@@ -5,6 +5,8 @@ from contextlib import ExitStack,redirect_stdout,closing
 from unittest.mock import patch
 BASE=Path(__file__).resolve().parents[1];sys.path.insert(0,str(BASE))
 import compat,maintenance,runner,media_migration,store,app,model
+from terminal import Terminal
+from test_tools import synthetic
 
 class Portable(unittest.TestCase):
     def setUp(self):
@@ -64,6 +66,22 @@ class Portable(unittest.TestCase):
             pid=int((self.state/'child.pid').read_text());deadline=time.monotonic()+5
             while self.alive(pid) and time.monotonic()<deadline:time.sleep(.1)
             self.assertFalse(self.alive(pid),'FFmpeg left running')
+    def test_cli_interrupt_during_download_and_merge(self):
+        for stage in ('Mengunduh video','Menggabungkan video + audio'):
+            self.worker('p=subprocess.Popen(["ffmpeg","-v","error","-re","-f","lavfi","-i","testsrc2=size=32x32:rate=1","-f","null","-"],stdout=sys.stderr,stderr=sys.stderr)\nopen(os.path.join(os.path.dirname(sys.argv[1]),"child.pid"),"w").write(str(p.pid))\nprint(json.dumps({"type":"stage","message":'+repr(stage)+'}),flush=True)\ntime.sleep(60)')
+            item={'id':'x','title':'Fixture','url':'fixture:x','choice':model.pick(synthetic()),'subtitles':[],'status':'pending'}
+            script='import sys;sys.path.insert(0,'+repr(str(BASE))+');import runner,store,app;from pathlib import Path;from ui import UI\nroot=Path('+repr(str(self.root))+');runner.BASE=root;runner.STATE=store.STATE=app.STATE=root/".state"\njob=store.new_job('+repr([item])+',str(root/"media"))\ntry:app.execute(UI(True),job)\nexcept KeyboardInterrupt:sys.exit(130)'
+            with Terminal([sys.executable,'-c',script],BASE) as terminal:
+                data='';deadline=time.monotonic()+15;sent=False
+                while terminal.running() and time.monotonic()<deadline:
+                    data+=terminal.read(.1)
+                    if stage in data and not sent:terminal.interrupt();sent=True
+                data+=terminal.drain();self.assertTrue(sent,data);self.assertEqual(terminal.wait(),130,data)
+            latest=max((self.state/'jobs').glob('*.json'),key=lambda p:p.stat().st_mtime_ns)
+            self.assertEqual(json.loads(latest.read_text(encoding='utf-8'))['status'],'interrupted')
+            pid=int((self.state/'child.pid').read_text());deadline=time.monotonic()+5
+            while self.alive(pid) and time.monotonic()<deadline:time.sleep(.1)
+            self.assertFalse(self.alive(pid))
     def test_filename_unicode_and_windows_reserved_characters(self):
         item={'title':'CON<>:/\\|?* 日本語😀'+('a'*400),'id':'x','choice':{'mode':'audio','actual_quality':None,'audio_format':'original'},'subtitles':[]}
         name=model.basename(item);self.assertLess(len(name.encode('utf-8')),220)
@@ -82,6 +100,19 @@ class Portable(unittest.TestCase):
             media_migration.rebase_media(self.root,old,str(self.new));again=media_migration.rebase_media(self.root,old,str(self.new),True)
         self.assertEqual(again['changed'],0);job=store.load_job('abc');self.assertEqual(job['output'],str(self.new));self.assertIsNone(job['browser']);self.assertTrue(list((self.state/'media-path-backups').iterdir()))
         with closing(sqlite3.connect(self.state/'downloaded.sqlite3')) as db:self.assertEqual(db.execute('SELECT path FROM results').fetchone()[0],str(self.new/'video/a.mp4'))
+    def test_rebase_archive_collision_is_rejected_without_changes(self):
+        old='/old/YouTube';self.prepare_rebase(old)
+        with closing(sqlite3.connect(self.state/'downloaded.sqlite3')) as db:
+            target=str(self.new/'video/a.mp4');db.execute('INSERT INTO results VALUES (?,?,?)',('v',target,json.dumps({'path':target,'mode':'video','subtitles':[]})));db.commit()
+        before=(self.state/'downloaded.sqlite3').read_bytes()
+        with self.assertRaisesRegex(ValueError,'Benturan'):media_migration.rebase_media(self.root,old,str(self.new),True)
+        self.assertEqual(before,(self.state/'downloaded.sqlite3').read_bytes())
+    def test_rebase_archive_is_skipped_and_deleted_file_recovers(self):
+        old='/old/YouTube';self.prepare_rebase(old)
+        with redirect_stdout(io.StringIO()):media_migration.rebase_media(self.root,old,str(self.new))
+        archive=store.Archive();self.addCleanup(archive.close)
+        with patch.object(store,'probe'):
+            self.assertIsNotNone(archive.get('v','video',self.new));(self.new/'video/a.mp4').unlink();self.assertIsNone(archive.get('v','video',self.new))
     def test_rebase_missing_file_preserves_records(self):
         old='/old/YouTube';self.prepare_rebase(old);(self.new/'video/a.mp4').unlink();before=(self.state/'downloaded.sqlite3').read_bytes()
         with redirect_stdout(io.StringIO()),self.assertRaisesRegex(ValueError,'belum lengkap'):media_migration.rebase_media(self.root,old,str(self.new))
@@ -103,6 +134,10 @@ class NativeInstaller(unittest.TestCase):
             root=Path(folder)/'fresh tool';root.mkdir()
             for name in maintenance.program_files(BASE):
                 dest=root/name;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(BASE/name,dest)
+            media=Path(folder)/'media';media.mkdir();(media/'sentinel.mp4').write_bytes(b'unchanged media')
+            (root/'.state/jobs').mkdir(parents=True);(root/'.state/jobs/sentinel.json').write_bytes(b'{"id":"sentinel","items":[]}');(root/'settings.json').write_text(json.dumps({'output':str(media),'browser':None}),encoding='utf-8')
+            (root/'.state/downloaded.sqlite3').write_bytes(b'unchanged archive')
+            saved={n:(root/n).read_bytes() for n in ('settings.json','.state/jobs/sentinel.json','.state/downloaded.sqlite3')}
             # Installer must choose its own verified OS asset, never reuse another OS runtime.
             for args in (['setup'],['setup','--check']):subprocess.run([sys.executable,str(root/'maintenance.py'),*args],check=True,timeout=300)
             py=compat.python_path(root);subprocess.run([str(py),str(root/'app.py'),'preview','--plain'],check=True,timeout=15)
@@ -110,3 +145,5 @@ class NativeInstaller(unittest.TestCase):
             subprocess.run([sys.executable,str(root/'maintenance.py'),'update',str(moved)],check=True,timeout=300)
             subprocess.run([sys.executable,str(moved/'maintenance.py'),'rollback'],check=True,timeout=300)
             subprocess.run([sys.executable,str(moved/'maintenance.py'),'setup','--check'],check=True,timeout=60)
+            for name,data in saved.items():self.assertEqual((moved/name).read_bytes(),data)
+            self.assertEqual((media/'sentinel.mp4').read_bytes(),b'unchanged media')
