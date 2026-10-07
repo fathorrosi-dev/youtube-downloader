@@ -4,7 +4,7 @@ import json
 import re
 from urllib.parse import urlparse,parse_qs
 
-VERSION='1.1.0'
+VERSION='1.2.0'
 MODES=('video-audio','audio','video')
 
 class SelectionError(ValueError): pass

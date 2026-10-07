@@ -1,4 +1,10 @@
-# Verifikasi rilis 1.1.0
+# Verifikasi rilis 1.2.0
+
+Pengujian self-update sedang berjalan. Ditambahkan 15 tes protokol rilis stabil, autentikasi tanpa penyimpanan token, redirect tanpa kebocoran Authorization, checksum, validasi ZIP/versi/OS/Python, lock download, transaksi installer nyata dan rollback gagal, serta Ctrl+C yang ditunda sampai pemasangan selesai. Suite sekarang 52 tes termasuk 37 tes regresi.
+
+CI native 1.2.0 dan pemasangan home belum ditandai selesai. Paket tidak dipublikasikan sebagai rilis stabil sebelum semua job native lulus. Riwayat rilis sebelumnya:
+
+## Riwayat verifikasi 1.1.0
 
 Selesai, 7 Oktober 2026. [Seluruh 12 job CI lulus](https://github.com/fathorrosi-dev/youtube-downloader/actions/runs/37616777106), revisi kode `c77434f`. Perubahan berikutnya hanya dokumentasi.
 

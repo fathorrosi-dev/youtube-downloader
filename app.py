@@ -195,12 +195,19 @@ def preview(ui):
 def main():
     os.umask(0o077)
     parser=argparse.ArgumentParser(description='Download YouTube: pilih video/audio, kualitas, dan subtitle.')
-    parser.add_argument('action',nargs='?',help='Link YouTube, status, preview, atau resume')
+    parser.add_argument('action',nargs='?',help='Link YouTube, status, preview, resume, atau update')
     parser.add_argument('job',nargs='?',help='ID job untuk resume')
     parser.add_argument('--plain',action='store_true');parser.add_argument('--browser',help='Opsional: firefox atau firefox:/jalur/profil')
     parser.add_argument('--output',help='Folder hasil alternatif')
+    parser.add_argument('--check',action='store_true',help='Update: periksa rilis tanpa memasang')
+    parser.add_argument('--wait',action='store_true',help='Update: tunggu download aktif selesai')
     args=parser.parse_args();ui=UI(args.plain)
     try:
+        if args.action=='update':
+            if args.job or args.browser or args.output:raise ValueError('Gunakan update [--check] [--wait] [--plain]')
+            from self_update import perform
+            return perform(BASE,args.check,args.wait,lambda message:ui.say(message,BLUE),ui.activity)
+        if args.check or args.wait:raise ValueError('--check/--wait hanya digunakan dengan update')
         if args.action=='preview':preview(ui);return 0
         if args.action=='status':status(ui);return 0
         ui.say('YouTube Downloader · '+VERSION,BLUE)
@@ -217,6 +224,6 @@ def main():
                 job=wizard(ui,args.action,args.browser or settings().get('browser'),args.output)
             execute(ui,job)
         return 0
-    except (KeyboardInterrupt,Cancelled):ui.say('Dihentikan; job yang sudah tersimpan dapat dilanjutkan dengan resume ID_JOB.',BLUE);return 130
-    except Exception as exc:ui.say('! GAGAL · '+str(exc),RED);ui.say('Log: '+str(STATE/'download.log'));return 1
+    except (KeyboardInterrupt,Cancelled):ui.say('Pembaruan dihentikan sebelum pemasangan.' if args.action=='update' else 'Dihentikan; job yang sudah tersimpan dapat dilanjutkan dengan resume ID_JOB.',BLUE);return 130
+    except Exception as exc:ui.say('! GAGAL · '+str(exc),RED);ui.say('Log: '+str(STATE/('update.log' if args.action=='update' else 'download.log')));return 1
 if __name__=='__main__':sys.exit(main())

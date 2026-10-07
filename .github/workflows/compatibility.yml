@@ -71,3 +71,27 @@ jobs:
           from pathlib import Path
           for p in Path('.').glob('.state/setup.log'):
               print(p.read_text(encoding='utf-8',errors='replace'))
+
+  release:
+    name: Publish verified stable release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: native
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.13'
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python -c "import os,json; from model import VERSION; assert os.environ['RELEASE_TAG']=='v'+VERSION; assert json.load(open('release.json'))['version']==VERSION"
+      - name: Build program-only package
+        run: python release_bundle.py dist
+      - name: Publish package and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 --verify-tag --title "YouTube Downloader $GITHUB_REF_NAME" --notes "Stable release. All 12 native compatibility jobs passed. Program-only package; settings, cookies, jobs, archives and media are excluded."

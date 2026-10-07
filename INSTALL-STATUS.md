@@ -1,4 +1,8 @@
-# Pemasangan YouTube Downloader 1.1.0
+# Pemasangan YouTube Downloader 1.2.0
+
+Pembaruan self-update masih dalam verifikasi; home tetap 1.1.0 sampai pengujian wajib lulus. Catatan pemasangan sebelumnya:
+
+## Riwayat pemasangan 1.1.0
 
 Selesai, 7 Oktober 2026. Tools aktif di `~/tools/youtube-downloader`, diperbarui dari 1.0.0 menggunakan kunci proses dan updater. Cadangan 1.0.0 berada di `.state/program-backups/`; `.state/last-update.json` menunjuk cadangan terakhir untuk rollback.
 
@@ -19,6 +23,6 @@ cd "$HOME/tools/youtube-downloader"
 ./youtube-downloader 'LINK_YOUTUBE'
 ```
 
-Repo privat: [fathorrosi-dev/youtube-downloader](https://github.com/fathorrosi-dev/youtube-downloader). Repo/paket rilis hanya program, dokumen, dan tes; tidak menyertakan settings pribadi, cookie, job, database, media, `.venv`, atau `.runtime`. Update program tetap manual memakai paket rilis baru; setup --upgrade tetap mengikuti pin dependensi rilis.
+Repo privat: [fathorrosi-dev/youtube-downloader](https://github.com/fathorrosi-dev/youtube-downloader). Repo/paket rilis hanya program, dokumen, dan tes; tidak menyertakan settings pribadi, cookie, job, database, media, `.venv`, atau `.runtime`. Pada versi 1.1.0 update program masih manual; mulai 1.2.0 perintah self-update tersedia. Setup --upgrade tetap mengikuti pin dependensi rilis.
 
 PANDUAN.md menjelaskan pemasangan tiap OS; MIGRASI.md menjelaskan pindah perangkat, rebase-media, serta update/rollback.

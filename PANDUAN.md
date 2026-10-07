@@ -1,4 +1,4 @@
-# YouTube Downloader 1.1.0
+# YouTube Downloader 1.2.0
 
 Tools terpisah dari X Bookmarks untuk video YouTube, Shorts, dan playlist. Rekomendasi utama adalah **kualitas maksimal + audio terbaik** yang tersedia dalam bahasa audio pilihan. Setiap pilihan resolusi juga mengambil pasangan video terbaik pada resolusi tersebut dan audio terbaik; 1440p bukan pasangan yang lebih rendah mutunya karena tidak berlabel rekomendasi.
 
@@ -186,21 +186,41 @@ sudo apt install ffmpeg python3 python3-venv
 bash setup.sh
 ```
 
-Setup membuat lingkungan Python lokal, memasang semua dependensi rilis meskipun yt-dlp global sudah ada, dan memasang Deno lokal dari distribusi resmi npm dengan verifikasi checksum SHA-512 yang dipatok (tanpa memerlukan Node/npm terpasang). Rilis 1.1.0 memakai yt-dlp 2026.8.19, EJS 0.8.0, Rich 14.3.4, Questionary 2.1.1, dan Deno 2.9.6; Python 3.10 memakai websockets 16.0 karena 17.2 mensyaratkan Python 3.11+; seluruh dependensi dipatok dalam `requirements.lock`. Ini tidak mengubah tools X Bookmarks.
+Setup membuat lingkungan Python lokal, memasang semua dependensi rilis meskipun yt-dlp global sudah ada, dan memasang Deno lokal dari distribusi resmi npm dengan verifikasi checksum SHA-512 yang dipatok (tanpa memerlukan Node/npm terpasang). Rilis 1.2.0 memakai yt-dlp 2026.8.19, EJS 0.8.0, Rich 14.3.4, Questionary 2.1.1, dan Deno 2.9.6; Python 3.10 memakai websockets 16.0 karena 17.2 mensyaratkan Python 3.11+; seluruh dependensi dipatok dalam `requirements.lock`. Ini tidak mengubah tools X Bookmarks.
 
 ```bash
 bash setup.sh --check
 bash setup.sh --upgrade
 ```
 
-`--upgrade` memasang ulang **versi dependensi rilis yang dipatok**, bukan mencari versi terbaru dan bukan self-update program. Pembaruan program membutuhkan paket rilis baru yang sudah diuji:
+`--upgrade` **menyesuaikan dependensi dengan versi yang dipatok rilis terpasang**. Paket yang sudah sesuai biasanya dipertahankan; opsi ini tidak mencari yt-dlp terbaru atau memperbarui program.
+
+Mulai 1.2.0, pembaruan program tersedia lewat satu perintah dari folder tools terpasang:
+
+```bash
+cd "$HOME/tools/youtube-downloader"
+./youtube-downloader update --check  # periksa saja, tanpa memasang
+./youtube-downloader update          # cari, unduh, verifikasi, lalu pasang
+# jika sedang download, tunggu selesai:
+./youtube-downloader update --wait
+```
+
+Windows: `.\youtube-downloader.cmd update --check` dan `.\youtube-downloader.cmd update`. macOS memakai perintah Ubuntu yang sama. Tambahkan `--plain` untuk keluaran teks. Tidak ada pemeriksaan otomatis saat download: pembaruan hanya berjalan saat lo memanggil `update`.
+
+**Login GitHub sekali pada tiap perangkat.** Repo `fathorrosi-dev/youtube-downloader` privat; akun harus punya akses. Pasang GitHub CLI (`sudo apt install gh` di Ubuntu, `brew install gh` di macOS, `winget install --id GitHub.cli --exact` di Windows), lalu jalankan `gh auth login` dan pilih GitHub.com. Alternatif untuk otomasi: `GH_TOKEN` atau `GITHUB_TOKEN` dengan izin baca Contents repo. Jangan menuliskan token di argumen/perintah yang dibagikan; tools tidak menyimpan token dalam settings, paket, atau log.
+
+Self-update mengambil **rilis stabil yang dipublikasikan setelah CI lintas OS lulus**, bukan isi branch pengembangan. ZIP dan SHA-256 diambil melalui API repo tetap, checksum diperiksa, dan metadata versi/OS/Python divalidasi sebelum installer dijalankan. Rilis sama/lebih lama dilewati; tidak ada downgrade otomatis. Checksum memeriksa integritas paket; sumber tepercaya tetap repo GitHub privat tersebut.
+
+Pembaruan memakai kunci yang sama dengan download; jika tools aktif, berhenti dengan pesan. `--wait` menunggu. Program lama dicadangkan di `.state/program-backups/`; settings/job/database/media dipertahankan. Kegagalan pemasangan memicu rollback melalui installer. Detail pemasangan ada di `.state/update.log` dan `.state/setup.log`. Saat unduhan paket belum selesai, Ctrl+C membatalkan tanpa mengganti program; setelah tahap pemasangan mulai, Ctrl+C ditunda sampai transaksi selesai/pulih, lalu keluar 130.
+
+Update manual tetap tersedia sebagai alternatif, termasuk pemasangan pertama dari versi 1.1.0 yang belum mengenal perintah `update`:
 
 ```bash
 cd /jalur/paket-rilis-baru
 bash update.sh "$HOME/tools/youtube-downloader"
 ```
 
-Pembaruan memakai kunci yang sama dengan download; jika tools aktif, berhenti dengan pesan. Tambahkan `--wait` untuk menunggu. Program lama dicadangkan, settings/job/database/media dipertahankan. Jika pemasangan gagal, program dipulihkan.
+Jika dependensi menu bermasalah, gunakan jalur stdlib `python3 self_update.py --check` atau `python3 self_update.py` dari folder terpasang (Windows: `python self_update.py`). Pemeriksaan OS/Python dan setup tetap berlaku. Jika rilis belum tersedia, login ditolak, atau koneksi putus, tools menjelaskan masalah; coba lagi setelah kondisi pulih.
 
 ```bash
 cd "$HOME/tools/youtube-downloader"
@@ -209,7 +229,7 @@ bash rollback.sh
 
 Rollback memulihkan program serta dependensi rilis sebelumnya tanpa menghapus media. Detail pemindahan ada di **MIGRASI.md**. Livestream aktif/premiere mendatang, seluruh kanal, dan burn-in belum termasuk cakupan tools ini.
 
-Referensi mekanisme sumber: [yt-dlp](https://github.com/yt-dlp/yt-dlp#embedding-yt-dlp), [YouTube EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS), [Rich Live](https://rich.readthedocs.io/en/stable/live.html).
+Referensi mekanisme sumber: [yt-dlp](https://github.com/yt-dlp/yt-dlp#embedding-yt-dlp), [YouTube EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS), [Rich Live](https://rich.readthedocs.io/en/stable/live.html), [API rilis GitHub](https://docs.github.com/en/rest/releases/releases#get-the-latest-release), [aset rilis privat](https://docs.github.com/en/rest/releases/assets#get-a-release-asset).
 
 ## Pemeriksaan perangkat dan batas verifikasi
 

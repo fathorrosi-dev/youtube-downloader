@@ -1,4 +1,4 @@
-# Migrasi, update, dan rollback YouTube Downloader 1.1.0
+# Migrasi, update, dan rollback YouTube Downloader 1.2.0
 
 Program dan catatan berada dalam folder tools; media terpisah. Semua tindakan memakai `.state/run.lock`. Tunggu download selesai; `--wait` tersedia untuk pemeliharaan. Jangan menjalankan dua salinan tools bersamaan terhadap media yang sama.
 
@@ -50,9 +50,13 @@ Dry-run menampilkan jalur yang akan berubah, jumlah job/hasil, dan media/SRT yan
 
 Identitas varian dan schema arsip tetap sama; resume melewati hasil valid di lokasi baru. Jika ingin membatalkan pemetaan, hentikan proses lalu salin kembali database, settings, dan job dari cadangan yang tercetak; jangan mencampur cadangan dari tahap yang berbeda. Salinan media tetap di tempatnya.
 
-## Update manual dan rollback
+## Self-update, update manual, dan rollback
 
-Program tidak mencari atau memasang rilis baru otomatis. `setup --upgrade` memasang ulang versi dependensi yang dipatok rilis; itu bukan self-update program.
+Mulai 1.2.0, jalankan `./youtube-downloader update --check` untuk memeriksa atau `./youtube-downloader update --wait` untuk mengambil dan memasang rilis stabil terbaru. Windows memakai `.\youtube-downloader.cmd update --wait`. Di perangkat tujuan, pasang GitHub CLI lalu `gh auth login` dengan akun yang punya akses repo privat. Login perangkat lama tidak disalin oleh migrasi.
+
+Self-update memverifikasi checksum dan metadata paket lalu memakai updater/backup/kunci yang sama. Tidak ada perubahan media dan tidak perlu rebase ulang untuk update di perangkat yang sama. Ctrl+C saat pemasangan ditunda hingga transaksi selesai, lalu keluar 130. Paket rilis tidak membawa settings atau kredensial pribadi. `setup --upgrade` hanya menyesuaikan dependensi dengan pin rilis terpasang.
+
+Jika sumber masih 1.1.0, pemasangan pertama 1.2.0 memakai paket manual berikut; setelah itu perintah self-update tersedia.
 
 Jalankan updater dari **paket rilis baru terpisah**, arahkan ke tools aktif:
 
