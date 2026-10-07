@@ -4,6 +4,9 @@ on:
     paths-ignore: ["**.md", "**.svg"]
   pull_request:
   workflow_dispatch:
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -35,7 +38,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg --yes --no-progress }
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              choco install ffmpeg --yes --no-progress
+              if ($LASTEXITCODE -eq 0) { break }
+              if ($attempt -eq 3) { throw 'FFmpeg installation failed after retries' }
+              Start-Sleep -Seconds 5
+            }
+          }
           Add-Content $env:GITHUB_PATH 'C:\ProgramData\chocolatey\bin'
       - name: Setup
         run: python maintenance.py setup

@@ -140,6 +140,12 @@ class NativeInstaller(unittest.TestCase):
             saved={n:(root/n).read_bytes() for n in ('settings.json','.state/jobs/sentinel.json','.state/downloaded.sqlite3')}
             # Installer must choose its own verified OS asset, never reuse another OS runtime.
             for args in (['setup'],['setup','--check']):subprocess.run([sys.executable,str(root/'maintenance.py'),*args],check=True,timeout=300)
+            launcher=root/('youtube-downloader.cmd' if os.name=='nt' else 'youtube-downloader')
+            launcher_args=['cmd.exe','/d','/c','call',str(launcher)] if os.name=='nt' else [str(launcher)]
+            result=subprocess.run([*launcher_args,'preview','--plain'],capture_output=True,text=True,encoding='utf-8',timeout=15)
+            self.assertEqual(result.returncode,0,result.stderr);self.assertIn('Preview selesai',result.stderr)
+            result=subprocess.run([*launcher_args,'resume'],capture_output=True,text=True,encoding='utf-8',timeout=15)
+            self.assertEqual(result.returncode,1,result.stderr)
             py=compat.python_path(root);subprocess.run([str(py),str(root/'app.py'),'preview','--plain'],check=True,timeout=15)
             moved=Path(folder)/'moved tools';subprocess.run([sys.executable,str(root/'maintenance.py'),'migrate',str(moved)],check=True,timeout=300)
             subprocess.run([sys.executable,str(root/'maintenance.py'),'update',str(moved)],check=True,timeout=300)
