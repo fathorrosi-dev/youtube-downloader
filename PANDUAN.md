@@ -1,0 +1,155 @@
+# YouTube Downloader 1.0.0
+
+Tools terpisah dari X Bookmarks untuk video YouTube, Shorts, dan playlist. Rekomendasi utama adalah **kualitas maksimal + audio terbaik** yang tersedia dalam bahasa audio pilihan. Setiap pilihan resolusi juga mengambil pasangan video terbaik pada resolusi tersebut dan audio terbaik; 1440p bukan pasangan yang lebih rendah mutunya karena tidak berlabel rekomendasi.
+
+## Mulai dari awal
+
+Tools sudah dipasang di `~/tools/youtube-downloader`. Buka Warp:
+
+```bash
+cd "$HOME/tools/youtube-downloader"
+bash setup.sh --check
+./youtube-downloader preview
+./youtube-downloader 'https://www.youtube.com/watch?v=ID_VIDEO'
+```
+
+Atau jalankan `./youtube-downloader` lalu tempel link ketika diminta. URL Shorts dan playlist memakai perintah yang sama. Pakai tanda kutip pada link, terutama yang mengandung `&`.
+
+Panah atas/bawah memilih, Enter mengonfirmasi, Space mencentang subtitle/item playlist. Ctrl+C membatalkan. Tidak ada download sebelum ringkasan terakhir disetujui. `--plain` mengganti menu dengan nomor dan download dengan teks singkat:
+
+```bash
+./youtube-downloader --plain 'https://www.youtube.com/shorts/ID_VIDEO'
+```
+
+Wizard memerlukan terminal untuk menjawab menu. Jika output dialihkan ke file, tampilan otomatis plain; stdin tetap perlu terminal. Job tersimpan bisa di-resume tanpa menu.
+
+## Urutan pilihan
+
+1. Tools mengambil judul, durasi, kanal, ukuran asli, dan format yang tersedia. Link video yang juga memuat playlist menawarkan video saja atau playlist.
+2. Playlist menawarkan semua item, checkbox, atau nomor/rentang seperti `1,3,5-10`. Metadata tiap item diperiksa sebelum ringkasan. Video private/deleted dapat dilewati.
+3. Pilih **Video + audio**, **Audio saja**, atau **Video saja — tanpa suara**.
+4. Video menawarkan kualitas maksimal, resolusi asli yang tersedia, atau pemilihan format detail per item. Tidak ada upscale. Pada playlist, target yang tidak tersedia turun ke resolusi terbaik di bawah target; perubahan terlihat dalam ringkasan. Item yang tidak memiliki resolusi di bawah target dilewati.
+5. Pilih bahasa asli per video atau bahasa audio/dub yang benar-benar tersedia. Jika dub pilihan tidak ada pada item playlist, item itu dilewati; tools tidak mengganti bahasa diam-diam. `und` berarti YouTube tidak memberi identitas bahasa.
+6. Audio saja menawarkan **audio asli terbaik** tanpa konversi atau **MP3** dengan konversi lossy. Bisa memilih format/bitrate secara detail.
+7. Subtitle bersifat opsional. Pilih satu atau beberapa track, lalu tinjau ringkasan judul, kualitas, FPS, SDR/HDR, container, audio, perkiraan ukuran, dan tujuan file.
+8. Pilih Mulai. ID job langsung disimpan agar proses dapat dilanjutkan.
+
+Resolusi portrait dihitung dari sisi pendek: 1080×1920 ditampilkan sebagai 1080p. Video landscape maupun portrait mempertahankan orientasi, ukuran, FPS, dan codec sumber. Daftar dan estimasi bergantung pada format yang YouTube berikan saat pemeriksaan; ukuran yang belum diketahui tidak dibuat-buat.
+
+## Hasil video + audio
+
+**Hasil akhirnya satu video biasa dengan suara.** Video dan audio terpisah hanya dipakai sementara, kemudian FFmpeg menggabungkannya tanpa mengubah kualitas sumber. File sementara yang sukses dibersihkan. Video saja benar-benar tanpa audio, termasuk jika sumber format awal sudah memiliki audio.
+
+Container dipilih sesuai codec: MP4 jika pasangan kompatibel, MKV untuk pasangan lain atau video dengan subtitle. MKV tetap satu file video dengan suara. Kualitas maksimal bisa memakai codec yang tidak didukung semua player; VLC/mpv biasanya lebih sesuai. MP3 merupakan pilihan konversi terpisah, bukan default kualitas terbaik.
+
+## Subtitle
+
+Menu membedakan **CC asli**, **caption otomatis**, dan **terjemahan otomatis**, beserta bahasa sumber bila YouTube menyediakannya. Terjemahan hanya ditawarkan jika ada track/URL terjemahan dari YouTube. Tools tidak membuat terjemahan sendiri dan tidak mengubah suara menjadi dub baru.
+
+Setiap track disimpan sebagai **SRT terpisah**. Untuk mode yang memiliki video, track juga dimasukkan ke MKV sebagai subtitle yang bisa dinyalakan/dimatikan. Untuk audio saja, SRT tetap terpisah. Tidak ada burn-in.
+
+Subtitle gagal tidak membuang media yang sudah selesai: hasil ditandai partial. Resume mengambil kembali subtitle yang hilang dan memperbarui track dalam hasil akhir, menggunakan media yang sudah ada. Nama track membedakan CC dan caption otomatis. Pada playlist dengan banyak sumber, sumber dipilih per item dan terlihat pada ringkasan.
+
+## Folder dan nama file
+
+```text
+~/Videos/YouTube/
+├── video/       # video + audio atau video tanpa suara
+├── audio/       # audio asli atau MP3
+└── subtitle/    # SRT pilihan
+
+~/tools/youtube-downloader/
+├── youtube-downloader
+├── settings.json       # opsional, pengaturan pengguna
+├── .venv/              # dependensi terpisah
+├── .runtime/bin/deno   # runtime lokal
+└── .state/             # job, arsip, log, cache, file sementara, cadangan
+```
+
+Nama hasil memuat judul, ID YouTube, kualitas, mode, dan identitas varian. Berbeda resolusi, mode, bahasa audio, atau pilihan subtitle bisa menghasilkan file terpisah. Tidak ada folder per video/playlist. JSON/log/database tidak ikut masuk folder media.
+
+Tujuan sekali pakai:
+
+```bash
+./youtube-downloader --output "$HOME/Videos/YouTubeLain" 'LINK_YOUTUBE'
+```
+
+Default dapat disimpan dalam `settings.json` saat tools berhenti:
+
+```json
+{
+  "output": "~/Videos/YouTube",
+  "browser": null
+}
+```
+
+## Progress dan penghentian
+
+Panel diperbarui di tempat yang sama, maksimal sekitar empat kali per detik:
+
+- Pink `#FFC2D4`: item playlist yang sudah ditangani, termasuk gagal/dilewati.
+- Red `#E8384F`: file video atau audio aktif. Bar direset ketika berganti stream.
+- Sky `#A8D8F0`: nama file, kecepatan, dan informasi pendukung.
+- Blok `█` terisi, `░` kosong. Ukuran tidak diketahui memakai tiga blok bergerak dan tanpa persen/ETA; animasi berhenti saat menunggu/merge/gagal.
+- Status menampilkan pemeriksaan, pengunduhan, retry, menunggu dengan countdown jika durasinya diketahui, dan penggabungan.
+
+Pada terminal sempit, ukuran dipindah ke baris kecepatan. `NO_COLOR=1` mempertahankan blok tanpa warna. `--plain` tidak mencetak setiap pembaruan byte. Kegagalan selalu ditandai `! GAGAL`; merah pada bar bukan berarti gagal.
+
+Ctrl+C menghentikan worker dan FFmpeg, memulihkan kursor, mencatat checkpoint, dan keluar dengan kode 130. Setelah selesai/dihentikan ada ringkasan permanen, lokasi hasil, job, dan log.
+
+```bash
+./youtube-downloader status
+./youtube-downloader resume ID_JOB
+```
+
+File yang masih valid dilewati; varian lain tetap boleh diunduh. Jika hasil dihapus, resume mengunduhnya lagi. File parsial di `.state/temporary/` dipertahankan untuk percobaan berikutnya. Jika format pilihan sudah berubah/hilang di YouTube, buat job baru untuk meninjau pilihan baru. Resume mempertahankan pilihan job, bukan memilih kualitas lain otomatis.
+
+## Login Firefox dan masalah koneksi
+
+Download publik tidak memakai cookie secara default. Jika YouTube meminta login/konfirmasi umur/not-a-bot, batch berhenti supaya tidak meneruskan permintaan gagal. Login di Firefox, lalu jalankan:
+
+```bash
+./youtube-downloader --browser firefox 'LINK_YOUTUBE'
+./youtube-downloader resume ID_JOB --browser firefox
+```
+
+Profil khusus: `--browser 'firefox:/jalur/profil'`. Tools memakai pembaca cookie yt-dlp, bukan meminta password atau membuat file cookie di media. Cookie browser tidak portable untuk komputer lain.
+
+Retry jaringan dibatasi empat kali, timeout socket 30 detik. Tiga kegagalan sistem berturut-turut menghentikan batch. Subtitle menghormati `Retry-After` numerik dan retry dengan jeda. Batas permintaan YouTube/403 bisa tetap memerlukan menunggu dan sesi browser yang valid; jangan menganggap setiap penurunan speed sebagai Wi-Fi bermasalah.
+
+Detail ada di `.state/download.log` dan `.state/setup.log`. Log/checkpoint dapat berisi URL bertanda tangan atau informasi sesi; jangan membagikannya mentah. Tools tidak menghapus hasil sukses ketika ada kegagalan.
+
+## Setup dan pembaruan
+
+Ubuntu memerlukan Python 3.10+ serta FFmpeg/FFprobe. Jika belum ada FFmpeg:
+
+```bash
+sudo apt update
+sudo apt install ffmpeg python3 python3-venv
+bash setup.sh
+```
+
+Setup membuat lingkungan Python lokal, memasang semua dependensi rilis meskipun yt-dlp global sudah ada, dan memasang Deno lokal dari distribusi resmi npm dengan verifikasi checksum SHA-512 yang dipatok (tanpa memerlukan Node/npm terpasang). Rilis 1.0.0 memakai yt-dlp 2026.8.19, EJS 0.8.0, Rich 14.3.4, Questionary 2.1.1, dan Deno 2.9.6; seluruh dependensi dipatok dalam `requirements.lock`. Ini tidak mengubah tools X Bookmarks.
+
+```bash
+bash setup.sh --check
+bash setup.sh --upgrade
+```
+
+`--upgrade` memasang ulang **versi dependensi rilis yang dipatok**, bukan mencari versi terbaru dan bukan self-update program. Pembaruan program membutuhkan paket rilis baru yang sudah diuji:
+
+```bash
+cd /jalur/paket-rilis-baru
+bash update.sh "$HOME/tools/youtube-downloader"
+```
+
+Pembaruan memakai kunci yang sama dengan download; jika tools aktif, berhenti dengan pesan. Tambahkan `--wait` untuk menunggu. Program lama dicadangkan, settings/job/database/media dipertahankan. Jika pemasangan gagal, program dipulihkan.
+
+```bash
+cd "$HOME/tools/youtube-downloader"
+bash rollback.sh
+```
+
+Rollback memulihkan program serta dependensi rilis sebelumnya tanpa menghapus media. Detail pemindahan ada di **MIGRASI.md**. Livestream aktif/premiere mendatang, seluruh kanal, dan burn-in belum termasuk cakupan tools ini.
+
+Referensi mekanisme sumber: [yt-dlp](https://github.com/yt-dlp/yt-dlp#embedding-yt-dlp), [YouTube EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS), [Rich Live](https://rich.readthedocs.io/en/stable/live.html).

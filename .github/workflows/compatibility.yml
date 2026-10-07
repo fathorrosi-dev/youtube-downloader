@@ -1,0 +1,55 @@
+name: Native compatibility
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    name: ${{ matrix.os }} Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15-intel, macos-15]
+        python: ['3.10', '3.13', '3.14']
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: ${{ matrix.python }}
+      - name: FFmpeg Ubuntu
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: FFmpeg macOS
+        if: runner.os == 'macOS'
+        run: command -v ffmpeg >/dev/null || brew install ffmpeg
+      - name: FFmpeg Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg --yes --no-progress }
+          Add-Content $env:GITHUB_PATH 'C:\ProgramData\chocolatey\bin'
+      - name: Setup
+        run: python maintenance.py setup
+      - name: Check
+        run: python maintenance.py setup --check
+      - name: Windows ConPTY test dependency
+        if: runner.os == 'Windows'
+        run: .venv/Scripts/python.exe -m pip install pywinpty==3.0.5
+      - name: Tests POSIX
+        if: runner.os != 'Windows'
+        env:
+          YT_TEST_INSTALL: ${{ matrix.python == '3.13' && '1' || '0' }}
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Tests Windows native
+        if: runner.os == 'Windows'
+        env:
+          YT_TEST_INSTALL: ${{ matrix.python == '3.13' && '1' || '0' }}
+        run: .venv/Scripts/python.exe -m unittest discover -s tests -v

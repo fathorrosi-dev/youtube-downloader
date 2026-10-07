@@ -1,0 +1,68 @@
+"""Portable isolated worker: NDJSON stdout, private stderr, bounded reader queue."""
+import json,os,queue,subprocess,sys,threading,uuid
+from store import BASE,STATE,write_json
+from compat import ProcessTree
+
+MAX_EVENT=32*1024**2
+class WorkerError(RuntimeError):
+    def __init__(self,message,category='system'):super().__init__(message);self.category=category
+
+
+def read_events(stream,messages,cancel):
+    def put(value):
+        while not cancel.is_set():
+            try:messages.put(value,timeout=.1);return
+            except queue.Full:pass
+    try:
+        while not cancel.is_set():
+            line=stream.readline(MAX_EVENT+1)
+            if not line:break
+            if len(line)>MAX_EVENT:put(WorkerError('Kanal worker terlalu besar'));break
+            if not line.endswith(b'\n'):put(WorkerError('Worker berhenti dengan event tidak lengkap'));break
+            try:event=json.loads(line)
+            except (ValueError,UnicodeError):put(WorkerError('Event worker rusak'));break
+            if not isinstance(event,dict) or not isinstance(event.get('type'),str):put(WorkerError('Event worker tidak valid'));break
+            put(event)
+    except Exception as exc:put(WorkerError('Kanal worker gagal: '+str(exc)))
+    finally:put(None)
+
+
+def run(request,on_event=None):
+    STATE.mkdir(parents=True,exist_ok=True)
+    config=STATE/f'worker-{uuid.uuid4().hex}.json';write_json(config,request)
+    process=None;tree=None;done=None;reader=None;messages=queue.Queue(64);cancel=threading.Event()
+    try:
+        with (STATE/'download.log').open('a',encoding='utf-8') as log:
+            flags={'creationflags':subprocess.CREATE_NEW_PROCESS_GROUP} if os.name=='nt' else {'start_new_session':True}
+            process=subprocess.Popen([sys.executable,str(BASE/'worker.py'),str(config)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,env={**os.environ,'PYTHONUTF8':'1','PYTHONIOENCODING':'utf-8'},**flags)
+            tree=ProcessTree(process)
+            reader=threading.Thread(target=read_events,args=(process.stdout,messages,cancel),daemon=True);reader.start()
+            process.stdin.write(b'START\n');process.stdin.flush();process.stdin.close()
+            while True:
+                try:event=messages.get(timeout=.25)
+                except queue.Empty:
+                    if process.poll() is not None and not reader.is_alive():break
+                    continue
+                if event is None:break
+                if isinstance(event,WorkerError):raise event
+                if done:raise WorkerError('Worker mengirim event setelah laporan akhir')
+                if event['type']=='done':done=event
+                elif on_event:on_event(event)
+            try:code=process.wait(timeout=3)
+            except subprocess.TimeoutExpired:raise WorkerError('Worker tidak berhenti setelah menutup kanal')
+            if not done:raise WorkerError('Worker berhenti tanpa laporan lengkap; lihat .state/download.log')
+            if code or done.get('error'):raise WorkerError(done.get('error') or f'Worker gagal ({code})',done.get('category','system'))
+            return done.get('result')
+    except BaseException:
+        if tree:tree.stop()
+        elif process and process.poll() is None:process.kill();process.wait()
+        raise
+    finally:
+        if tree:
+            if os.name!='nt':tree.stop()
+            tree.close()
+        cancel.set()
+        if reader:reader.join(timeout=3)
+        if process and process.stdout:process.stdout.close()
+        if process and process.stdin and not process.stdin.closed:process.stdin.close()
+        config.unlink(missing_ok=True)

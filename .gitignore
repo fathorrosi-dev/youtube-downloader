@@ -1,0 +1,12 @@
+.venv/
+.runtime/
+.state/
+settings.json
+__pycache__/
+*.pyc
+media/
+*.log
+*.sqlite3
+*.part
+*.zip
+.DS_Store
