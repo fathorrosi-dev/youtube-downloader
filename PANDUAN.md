@@ -34,7 +34,7 @@ bash setup.sh --check
 ./youtube-downloader preview
 ```
 
-Setup dan launcher memakai `python3` dari PATH. Jalankan setup kembali jika mengganti interpreter, OS, arsitektur, atau memindahkan folder. Pastikan Python native sesuai arsitektur yang digunakan; Intel memakai binary Deno Intel, Apple Silicon memakai ARM.
+Setup dan launcher memakai `python3` dari PATH. Untuk sesi terminal baru, jalankan ekspor PATH di atas lagi atau simpan barisnya di `~/.zprofile`. Jalankan setup kembali jika mengganti interpreter, OS, arsitektur, atau memindahkan folder. Pastikan Python native sesuai arsitektur yang digunakan; Intel memakai binary Deno Intel, Apple Silicon memakai ARM.
 
 **Windows — PowerShell atau Command Prompt, tanpa WSL**
 
