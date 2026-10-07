@@ -1,6 +1,7 @@
 name: Native compatibility
 on:
   push:
+    paths-ignore: ["**.md", "**.svg"]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -53,3 +54,10 @@ jobs:
         env:
           YT_TEST_INSTALL: ${{ matrix.python == '3.13' && '1' || '0' }}
         run: .venv/Scripts/python.exe -m unittest discover -s tests -v
+      - name: Setup diagnostics on failure
+        if: failure()
+        shell: python
+        run: |
+          from pathlib import Path
+          for p in Path('.').glob('.state/setup.log'):
+              print(p.read_text(encoding='utf-8',errors='replace'))
