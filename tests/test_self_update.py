@@ -18,6 +18,7 @@ class SelfUpdate(unittest.TestCase):
         (self.source/'model.py').write_text("VERSION='1.2.0'\n",encoding='utf-8')
         meta={'version':'1.2.0','platforms':[compat.platform_key()],'python_min':'3.10','python_max':'3.14'}
         (self.source/'release.json').write_text(json.dumps(meta),encoding='utf-8')
+        (self.dest/'release.json').write_text(json.dumps({**meta,'version':'1.1.0'}),encoding='utf-8')
         self.archive,self.checksum=release_bundle.build(self.source,self.root/'packages')
         self.info={'tag_name':'v1.2.0','draft':False,'prerelease':False,'assets':[{'id':1,'name':self.archive.name,'state':'uploaded','size':self.archive.stat().st_size},{'id':2,'name':self.checksum.name,'state':'uploaded','size':self.checksum.stat().st_size}]}
         self.data={'/releases/latest':json.dumps(self.info).encode(),'/releases/assets/1':self.archive.read_bytes(),'/releases/assets/2':self.checksum.read_bytes()}
