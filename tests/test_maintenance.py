@@ -83,6 +83,7 @@ class Wizard(unittest.TestCase):
                 if 'Choose' in data and not sent_select:time.sleep(.2);term.write('\x1b[B\r');sent_select=True
                 if 'Tracks' in data and not sent_check:time.sleep(.2);term.write(' \x1b[B \r');sent_check=True
             data+=term.drain()
+            if term.running():raise AssertionError("Menu did not exit: "+repr(data))
             self.assertEqual(term.wait(),0,data);self.assertIn('SELECT 2',data);self.assertIn("CHECK ['en', 'ja']",data)
 
 

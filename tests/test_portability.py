@@ -1,14 +1,14 @@
 """Native process containment, event protocol, migration and installation tests."""
 import io,json,os,queue,shutil,sqlite3,subprocess,sys,tempfile,time,unittest
 from pathlib import Path,PureWindowsPath,PurePosixPath
-from contextlib import ExitStack,redirect_stdout
+from contextlib import ExitStack,redirect_stdout,closing
 from unittest.mock import patch
 BASE=Path(__file__).resolve().parents[1];sys.path.insert(0,str(BASE))
 import compat,maintenance,runner,media_migration,store,app,model
 
 class Portable(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory(prefix='YT 日本語 ');self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name);self.state=self.root/'.state';self.state.mkdir()
+        self.tmp=tempfile.TemporaryDirectory(prefix='YT 日本語 ');self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name).resolve();self.state=self.root/'.state';self.state.mkdir()
         stack=ExitStack();self.addCleanup(stack.close)
         for module in (store,runner):stack.enter_context(patch.object(module,'STATE',self.state))
         stack.enter_context(patch.object(runner,'BASE',self.root))
@@ -34,7 +34,7 @@ class Portable(unittest.TestCase):
         code='import sys,time;sys.path.insert(0,sys.argv[1]);from compat import file_lock\nwith file_lock(sys.argv[2]):print("ready",flush=True);sys.stdin.readline()'
         p=subprocess.Popen([sys.executable,'-c',code,str(BASE),str(self.state/'run.lock')],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
         try:
-            self.assertEqual(p.stdout.readline(),b'ready\n')
+            self.assertEqual(p.stdout.readline().strip(),b'ready')
             with self.assertRaises(ValueError):
                 with compat.file_lock(self.state/'run.lock'):pass
             p.stdin.write(b'END\n');p.stdin.close();p.wait(timeout=5)
@@ -81,7 +81,7 @@ class Portable(unittest.TestCase):
             preview=media_migration.rebase_media(self.root,old,str(self.new),True);self.assertGreater(preview['changed'],0);self.assertEqual(before,(self.state/'jobs/abc.json').read_bytes())
             media_migration.rebase_media(self.root,old,str(self.new));again=media_migration.rebase_media(self.root,old,str(self.new),True)
         self.assertEqual(again['changed'],0);job=store.load_job('abc');self.assertEqual(job['output'],str(self.new));self.assertIsNone(job['browser']);self.assertTrue(list((self.state/'media-path-backups').iterdir()))
-        with sqlite3.connect(self.state/'downloaded.sqlite3') as db:self.assertEqual(db.execute('SELECT path FROM results').fetchone()[0],str(self.new/'video/a.mp4'))
+        with closing(sqlite3.connect(self.state/'downloaded.sqlite3')) as db:self.assertEqual(db.execute('SELECT path FROM results').fetchone()[0],str(self.new/'video/a.mp4'))
     def test_rebase_missing_file_preserves_records(self):
         old='/old/YouTube';self.prepare_rebase(old);(self.new/'video/a.mp4').unlink();before=(self.state/'downloaded.sqlite3').read_bytes()
         with redirect_stdout(io.StringIO()),self.assertRaisesRegex(ValueError,'belum lengkap'):media_migration.rebase_media(self.root,old,str(self.new))

@@ -24,7 +24,7 @@ class Terminal:
         try:return self.decoder.decode(os.read(self.fd,65536))
         except OSError:return ''
     def write(self,value):
-        if os.name=='nt':self.p.write(value)
+        if os.name=='nt':self.p.write(value.replace('\r','\r\n'))
         else:os.write(self.fd,value.encode('utf-8'))
     def interrupt(self):
         if os.name=='nt':self.p.sendintr()

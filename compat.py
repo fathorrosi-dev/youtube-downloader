@@ -98,8 +98,9 @@ class WindowsJob:
 
 class ProcessTree:
     def __init__(self,process):
-        self.process=process;self.job=WindowsJob(process.pid) if os.name=='nt' else None
+        self.stopped=False;self.process=process;self.job=WindowsJob(process.pid) if os.name=='nt' else None
     def stop(self):
+        if self.stopped:return
         p=self.process
         if os.name=='nt':
             if p.poll() is None:
@@ -113,14 +114,20 @@ class ProcessTree:
             for sig,timeout in ((signal.SIGINT,5),(signal.SIGTERM,2),(signal.SIGKILL,2)):
                 try:os.killpg(p.pid,sig)
                 except ProcessLookupError:break
+                except PermissionError:
+                    if p.poll() is not None:break # BSD may report EPERM for an empty group.
+                    raise
                 try:p.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:continue
                 # Kill remaining descendants even if the worker exited normally.
                 if sig!=signal.SIGKILL:
                     try:os.killpg(p.pid,signal.SIGKILL)
                     except ProcessLookupError:pass
+                    except PermissionError:
+                        if p.poll() is None:raise
                 break
             p.wait(timeout=3)
+        self.stopped=True
     def close(self):
         if self.job:self.job.close();self.job=None
 

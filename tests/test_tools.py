@@ -149,7 +149,7 @@ class Display(unittest.TestCase):
     def test_tty_plain_no_color_and_interrupt(self):
         out=self.tty()
         for rgb in ('168;216;240','255;194;212','232;56;79'):self.assertIn('\x1b[38;2;'+rgb+'m',out)
-        self.assertIn('\x1b[1A',out);self.assertIn('\x1b[?25h',out)
+        self.assertRegex(out,r'\x1b\[[1-9][0-9]*A');self.assertIn('\x1b[?25h',out)
         out=self.tty(no_color=True);self.assertNotIn('\x1b[38;',out);self.assertIn('█',out)
         out=self.tty(interrupt=True);self.assertIn('Dihentikan',out);self.assertIn('\x1b[?25h',out)
         result=subprocess.run([sys.executable,str(BASE/'app.py'),'preview','--plain'],capture_output=True,text=True,timeout=10)

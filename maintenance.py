@@ -97,12 +97,9 @@ def setup(root,check=False,upgrade=False):
         if hashlib.sha256(wheel.read_bytes()).hexdigest()!=expected:raise ValueError('Checksum bootstrap pip tidak cocok')
         script='import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module("pip",run_name="__main__")'
         run_logged(root,[str(py),'-c',script,str(wheel),'install','--no-index','--no-deps',str(wheel)])
-    expected={}
-    for line in (root/'requirements.lock').read_text(encoding='utf-8').splitlines():
-        if '==' in line:
-            name,version=line.split('==',1);expected[name]=version
-    code='from importlib.metadata import version; import json,sys; expected=json.loads(sys.argv[1]); assert all(version(k)==v for k,v in expected.items())'
-    ready=subprocess.run([str(py),'-c',code,json.dumps(expected)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+    lines=[line for line in (root/'requirements.lock').read_text(encoding='utf-8').splitlines() if '==' in line]
+    code='from importlib.metadata import version; from pip._vendor.packaging.requirements import Requirement; import json,sys; rs=[Requirement(x) for x in json.loads(sys.argv[1])]; assert all(version(r.name) in r.specifier for r in rs if not r.marker or r.marker.evaluate())'
+    ready=subprocess.run([str(py),'-c',code,json.dumps(lines)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
     if check and not ready:raise ValueError('Dependensi tidak sesuai rilis; jalankan setup.sh')
     if not check and (upgrade or not ready):
         print('Memasang dependensi rilis yang dipatok',flush=True)

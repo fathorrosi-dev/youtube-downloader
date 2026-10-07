@@ -1,4 +1,5 @@
 """Explicit media-root rebasing with foreign path parsing and recovery backups."""
+from contextlib import closing
 import copy,json,os,shutil,sqlite3,time
 from pathlib import Path,PurePosixPath,PureWindowsPath
 from compat import native_output,platform_key
@@ -68,7 +69,7 @@ def rebase_media(base,old_root,new_root,dry_run=False):
         for path in paths:
             target=backup/path.relative_to(base);target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(path,target)
         if db:
-            with sqlite3.connect(backup/'downloaded.sqlite3') as saved:db.backup(saved)
+            with closing(sqlite3.connect(backup/'downloaded.sqlite3')) as saved:db.backup(saved)
         from store import write_json
         try:
             if db:db.execute('BEGIN IMMEDIATE')

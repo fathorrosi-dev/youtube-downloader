@@ -98,7 +98,7 @@ class Cancelled(Exception):pass
 class UI:
     def __init__(self,plain=False):
         self.plain=plain or not(sys.stdout.isatty() and sys.stderr.isatty()) or os.environ.get('TERM')=='dumb'
-        self.console=Console(stderr=True,force_terminal=not self.plain,color_system='truecolor' if not self.plain else None,no_color='NO_COLOR' in os.environ,highlight=False)
+        self.console=Console(stderr=True,force_terminal=not self.plain,legacy_windows=False,color_system='truecolor' if not self.plain else None,no_color='NO_COLOR' in os.environ,highlight=False)
         self.style=questionary.Style([('qmark',PINK),('question',BLUE),('answer',PINK),('pointer',BLUE),('highlighted',BLUE),('selected',PINK)]) if 'NO_COLOR' not in os.environ else questionary.Style([])
 
     def say(self,message,color=None):
