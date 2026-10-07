@@ -160,9 +160,14 @@ def execute(ui,job):
 
 def status(ui):
     rows=[('Versi',VERSION),('Platform',platform_key()),('Python',platform.python_version()+' · '+sys.executable),('Tools',str(BASE)),('Media',str(Path(settings()['output']).expanduser())),('Catatan',str(STATE))]
-    for name in ('yt-dlp','yt-dlp-ejs','rich','questionary'):
-        try:rows.append((name,version(name)))
-        except Exception:rows.append((name,'belum terpasang'))
+    from pip._vendor.packaging.requirements import Requirement
+    for line in (BASE/'requirements.lock').read_text(encoding='utf-8').splitlines():
+        if '==' not in line:continue
+        dependency=Requirement(line)
+        if dependency.marker and not dependency.marker.evaluate():continue
+        try:
+            actual=version(dependency.name);rows.append((dependency.name,actual+(' · TIDAK SESUAI '+str(dependency.specifier) if actual not in dependency.specifier else '')))
+        except Exception:rows.append((dependency.name,'belum terpasang'))
     for name in ('ffmpeg','ffprobe','deno'):
         binary=str(deno_path(BASE)) if name=='deno' else shutil.which(name)
         try:

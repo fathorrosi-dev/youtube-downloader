@@ -115,8 +115,10 @@ class ProcessTree:
                 try:os.killpg(p.pid,sig)
                 except ProcessLookupError:break
                 except PermissionError:
-                    if p.poll() is not None:break # BSD may report EPERM for an empty group.
-                    raise
+                    # BSD can report EPERM while the group leader is becoming a zombie.
+                    try:p.wait(timeout=1)
+                    except subprocess.TimeoutExpired:raise
+                    break
                 try:p.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:continue
                 # Kill remaining descendants even if the worker exited normally.
@@ -142,3 +144,20 @@ def worker_start():
 
 def environment_identity(root):
     return {'root':str(Path(root).resolve()),'platform':platform_key(),'python':'.'.join(map(str,sys.version_info[:2]))}
+
+
+def configure_terminal():
+    """Enable Windows VT processing before Rich writes ANSI; restore on exit."""
+    if os.name!='nt':return True
+    import atexit
+    from ctypes import wintypes as w
+    api=ctypes.WinDLL('kernel32',use_last_error=True)
+    api.GetStdHandle.argtypes=[w.DWORD];api.GetStdHandle.restype=w.HANDLE
+    api.GetConsoleMode.argtypes=[w.HANDLE,ctypes.POINTER(w.DWORD)];api.GetConsoleMode.restype=w.BOOL
+    api.SetConsoleMode.argtypes=[w.HANDLE,w.DWORD];api.SetConsoleMode.restype=w.BOOL
+    ready=True
+    for number in (-11,-12):
+        handle=api.GetStdHandle(number);mode=w.DWORD()
+        if not api.GetConsoleMode(handle,ctypes.byref(mode)) or not api.SetConsoleMode(handle,mode.value|0x5):ready=False;continue
+        atexit.register(api.SetConsoleMode,handle,mode.value)
+    return ready

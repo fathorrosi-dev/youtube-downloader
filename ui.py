@@ -9,6 +9,8 @@ from rich.table import Table,Column
 from rich.text import Text
 from rich.spinner import Spinner
 import questionary
+from prompt_toolkit.output import ColorDepth
+from compat import configure_terminal
 
 PINK = '#FFC2D4'
 RED = '#E8384F'
@@ -97,8 +99,10 @@ class Cancelled(Exception):pass
 
 class UI:
     def __init__(self,plain=False):
-        self.plain=plain or not(sys.stdout.isatty() and sys.stderr.isatty()) or os.environ.get('TERM')=='dumb'
+        vt=configure_terminal()
+        self.plain=plain or not vt or not(sys.stdout.isatty() and sys.stderr.isatty()) or os.environ.get('TERM')=='dumb'
         self.console=Console(stderr=True,force_terminal=not self.plain,legacy_windows=False,color_system='truecolor' if not self.plain else None,no_color='NO_COLOR' in os.environ,highlight=False)
+        self.depth=ColorDepth.DEPTH_1_BIT if 'NO_COLOR' in os.environ else ColorDepth.DEPTH_24_BIT
         self.style=questionary.Style([('qmark',PINK),('question',BLUE),('answer',PINK),('pointer',BLUE),('highlighted',BLUE),('selected',PINK)]) if 'NO_COLOR' not in os.environ else questionary.Style([])
 
     def say(self,message,color=None):
@@ -118,14 +122,14 @@ class UI:
                 if answer.isdigit() and 1<=int(answer)<=len(options):return options[int(answer)-1][1]
                 self.say('Pilihan tidak valid',RED)
         values=[questionary.Choice(label,value=value) for label,value in options]
-        result=questionary.select(title,choices=values,default=default,style=self.style).unsafe_ask()
+        result=questionary.select(title,choices=values,default=default,style=self.style,color_depth=self.depth).unsafe_ask()
         if result is None:raise Cancelled()
         return result
 
     def text(self,title,default=''):
         if not sys.stdin.isatty():raise ValueError('Masukkan link melalui terminal interaktif.')
         if self.plain:self.say(title,BLUE);return input().strip() or default
-        result=questionary.text(title,default=default,style=self.style).unsafe_ask()
+        result=questionary.text(title,default=default,style=self.style,color_depth=self.depth).unsafe_ask()
         if result is None:raise Cancelled()
         return result.strip()
 
@@ -139,7 +143,7 @@ class UI:
                 if answer=='none':return []
                 try:return [options[i][1] for i in item_indices(answer,len(options))]
                 except ValueError as exc:self.say(exc,RED)
-        result=questionary.checkbox(title,choices=[questionary.Choice(label,value=value) for label,value in options],style=self.style,instruction='Space pilih · Enter lanjut · Ctrl+C batal').unsafe_ask()
+        result=questionary.checkbox(title,choices=[questionary.Choice(label,value=value) for label,value in options],style=self.style,instruction='Space pilih · Enter lanjut · Ctrl+C batal',color_depth=self.depth).unsafe_ask()
         if result is None:raise Cancelled()
         return result
 

@@ -15,7 +15,7 @@ class Portable(unittest.TestCase):
     def worker(self,body):
         (self.root/'worker.py').write_text('import sys,os,json,time,subprocess\nsys.path.insert(0,'+repr(str(BASE))+')\nfrom compat import worker_start\nworker_start()\n'+body,encoding='utf-8')
     def test_corrupt_protocol_and_missing_final(self):
-        for body in ('print("broken",flush=True)','print("[]",flush=True)','sys.stdout.write("{\\\"type\\\":\\\"done\\\"}");sys.stdout.flush()','print(json.dumps({"type":"start"}),flush=True)','print(json.dumps({"type":"done"}),flush=True);print(json.dumps({"type":"done"}),flush=True)'):
+        for body in ('print("broken",flush=True)','print("[]",flush=True)','print(json.dumps({"type":"unexpected"}),flush=True)','print(json.dumps({"type":"progress","downloaded":"bad"}),flush=True)','sys.stdout.write("{\\\"type\\\":\\\"done\\\"}");sys.stdout.flush()','print(json.dumps({"type":"start"}),flush=True)','print(json.dumps({"type":"done"}),flush=True);print(json.dumps({"type":"done"}),flush=True)'):
             with self.subTest(body=body):
                 self.worker(body)
                 with self.assertRaises(runner.WorkerError):runner.run({})

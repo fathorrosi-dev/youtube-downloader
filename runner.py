@@ -1,4 +1,5 @@
 """Portable isolated worker: NDJSON stdout, private stderr, bounded reader queue."""
+import math
 import json,os,queue,subprocess,sys,threading,uuid
 from store import BASE,STATE,write_json
 from compat import ProcessTree
@@ -22,6 +23,10 @@ def read_events(stream,messages,cancel):
             try:event=json.loads(line)
             except (ValueError,UnicodeError):put(WorkerError('Event worker rusak'));break
             if not isinstance(event,dict) or not isinstance(event.get('type'),str):put(WorkerError('Event worker tidak valid'));break
+            if event['type'] not in {'start','progress','file_done','stage','retry','wait','failure','notice','done'}:put(WorkerError('Jenis event worker tidak dikenal'));break
+            invalid=any(k in event and event[k] is not None and (isinstance(event[k],bool) or not isinstance(event[k],(int,float)) or not math.isfinite(event[k]) or event[k]<0) for k in ('downloaded','total','speed','eta','until'))
+            invalid|=any(k in event and not isinstance(event[k],str) for k in ('message','name','stream','error','category'))
+            if invalid:put(WorkerError('Nilai event worker tidak valid'));break
             put(event)
     except Exception as exc:put(WorkerError('Kanal worker gagal: '+str(exc)))
     finally:put(None)

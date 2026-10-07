@@ -80,8 +80,8 @@ class Wizard(unittest.TestCase):
             data='';deadline=time.monotonic()+15;sent_select=False;sent_check=False
             while time.monotonic()<deadline and term.running():
                 data+=term.read(.1)
-                if 'Choose' in data and not sent_select:time.sleep(.2);term.write('\x1b[B\r');sent_select=True
-                if 'Tracks' in data and not sent_check:time.sleep(.2);term.write(' \x1b[B \r');sent_check=True
+                if 'Choose' in data and not sent_select:time.sleep(.2);term.write('\x1b[B');time.sleep(.1);term.write('\r');sent_select=True
+                if 'Tracks' in data and not sent_check:time.sleep(.2);term.write(' ');time.sleep(.1);term.write('\x1b[B');time.sleep(.1);term.write(' ');time.sleep(.1);term.write('\r');sent_check=True
             data+=term.drain()
             if term.running():raise AssertionError("Menu did not exit: "+repr(data))
             self.assertEqual(term.wait(),0,data);self.assertIn('SELECT 2',data);self.assertIn("CHECK ['en', 'ja']",data)
