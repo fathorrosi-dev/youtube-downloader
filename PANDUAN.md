@@ -1,10 +1,65 @@
-# YouTube Downloader 1.0.0
+# YouTube Downloader 1.1.0
 
 Tools terpisah dari X Bookmarks untuk video YouTube, Shorts, dan playlist. Rekomendasi utama adalah **kualitas maksimal + audio terbaik** yang tersedia dalam bahasa audio pilihan. Setiap pilihan resolusi juga mengambil pasangan video terbaik pada resolusi tersebut dan audio terbaik; 1440p bukan pasangan yang lebih rendah mutunya karena tidak berlabel rekomendasi.
 
+## Pemasangan tiap OS
+
+Python standar **3.10–3.14** didukung; gunakan **3.13** untuk pemasangan baru. Python free-threaded tidak termasuk dukungan. Target: Ubuntu 24.04+ x64, Windows 11 x64 native, macOS 15+ Intel/Apple Silicon. Linux ARM64 memiliki aset runtime tetapi belum diverifikasi. Windows ARM64, GUI, dan executable tanpa Python belum tersedia.
+
+Ambil paket rilis atau clone repo privat `fathorrosi-dev/youtube-downloader` dengan akun yang diberi akses. Ekstrak seluruh paket ke folder tools; jangan hanya menyalin launcher. Folder boleh mengandung spasi dan Unicode. Setup membutuhkan internet untuk dependensi Python dan runtime Deno.
+
+**Ubuntu**
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv ffmpeg
+mkdir -p "$HOME/tools"
+# Ekstrak paket ke ~/tools/youtube-downloader
+cd "$HOME/tools/youtube-downloader"
+bash setup.sh
+bash setup.sh --check
+./youtube-downloader preview
+```
+
+**macOS — Intel atau Apple Silicon**
+
+Pasang [Homebrew](https://brew.sh), lalu:
+
+```bash
+brew install python@3.13 ffmpeg
+cd "$HOME/tools/youtube-downloader"
+export PATH="$(brew --prefix python@3.13)/libexec/bin:$PATH"
+bash setup.sh
+bash setup.sh --check
+./youtube-downloader preview
+```
+
+Setup dan launcher memakai `python3` dari PATH. Jalankan setup kembali jika mengganti interpreter, OS, arsitektur, atau memindahkan folder. Pastikan Python native sesuai arsitektur yang digunakan; Intel memakai binary Deno Intel, Apple Silicon memakai ARM.
+
+**Windows — PowerShell atau Command Prompt, tanpa WSL**
+
+```powershell
+winget install --exact --id Python.Python.3.13
+winget install --exact --id Gyan.FFmpeg
+```
+
+Buka terminal baru supaya PATH terbaca. Jika `python --version` tidak menunjukkan Python yang dipasang, perbaiki PATH Python sebelum melanjutkan. Ekstrak paket misalnya ke `%USERPROFILE%\tools\youtube-downloader`, lalu dari PowerShell:
+
+```powershell
+cd "$HOME\tools\youtube-downloader"
+.\setup.cmd
+.\setup.cmd --check
+.\youtube-downloader.cmd preview
+.\youtube-downloader.cmd 'https://www.youtube.com/watch?v=ID_VIDEO'
+```
+
+Command Prompt memakai `cd /d "%USERPROFILE%\tools\youtube-downloader"`, `setup.cmd`, lalu `youtube-downloader.cmd "LINK"`. Launcher `.cmd` tidak membutuhkan perubahan execution policy. Pastikan `ffmpeg -version` dan `ffprobe -version` berhasil; setup memeriksa keduanya dan tidak mengunduh FFmpeg sendiri. Paket FFmpeg: [winget Gyan.FFmpeg](https://github.com/microsoft/winget-pkgs/tree/master/manifests/g/Gyan/FFmpeg), [formula Homebrew](https://formulae.brew.sh/formula/ffmpeg).
+
+Pada contoh panduan berikut, Windows mengganti `./youtube-downloader` dengan `.\youtube-downloader.cmd`, `bash setup.sh` dengan `.\setup.cmd`, serta skrip pemeliharaan lain dengan padanan `.cmd`.
+
 ## Mulai dari awal
 
-Tools sudah dipasang di `~/tools/youtube-downloader`. Buka Warp:
+Setelah setup, jalankan dari folder tools. Contoh Ubuntu/macOS:
 
 ```bash
 cd "$HOME/tools/youtube-downloader"
@@ -52,8 +107,10 @@ Subtitle gagal tidak membuang media yang sudah selesai: hasil ditandai partial. 
 
 ## Folder dan nama file
 
+Default Ubuntu: `~/Videos/YouTube`; macOS: `~/Movies/YouTube`; Windows: folder Videos pengguna yang sebenarnya (termasuk jika dipindahkan), subfolder `YouTube`. `--output "FOLDER"` mengubah lokasi job baru dan tetap dihormati.
+
 ```text
-~/Videos/YouTube/
+ROOT_MEDIA/
 ├── video/       # video + audio atau video tanpa suara
 ├── audio/       # audio asli atau MP3
 └── subtitle/    # SRT pilihan
@@ -129,7 +186,7 @@ sudo apt install ffmpeg python3 python3-venv
 bash setup.sh
 ```
 
-Setup membuat lingkungan Python lokal, memasang semua dependensi rilis meskipun yt-dlp global sudah ada, dan memasang Deno lokal dari distribusi resmi npm dengan verifikasi checksum SHA-512 yang dipatok (tanpa memerlukan Node/npm terpasang). Rilis 1.0.0 memakai yt-dlp 2026.8.19, EJS 0.8.0, Rich 14.3.4, Questionary 2.1.1, dan Deno 2.9.6; seluruh dependensi dipatok dalam `requirements.lock`. Ini tidak mengubah tools X Bookmarks.
+Setup membuat lingkungan Python lokal, memasang semua dependensi rilis meskipun yt-dlp global sudah ada, dan memasang Deno lokal dari distribusi resmi npm dengan verifikasi checksum SHA-512 yang dipatok (tanpa memerlukan Node/npm terpasang). Rilis 1.1.0 memakai yt-dlp 2026.8.19, EJS 0.8.0, Rich 14.3.4, Questionary 2.1.1, dan Deno 2.9.6; seluruh dependensi dipatok dalam `requirements.lock`. Ini tidak mengubah tools X Bookmarks.
 
 ```bash
 bash setup.sh --check
@@ -153,3 +210,13 @@ bash rollback.sh
 Rollback memulihkan program serta dependensi rilis sebelumnya tanpa menghapus media. Detail pemindahan ada di **MIGRASI.md**. Livestream aktif/premiere mendatang, seluruh kanal, dan burn-in belum termasuk cakupan tools ini.
 
 Referensi mekanisme sumber: [yt-dlp](https://github.com/yt-dlp/yt-dlp#embedding-yt-dlp), [YouTube EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS), [Rich Live](https://rich.readthedocs.io/en/stable/live.html).
+
+## Pemeriksaan perangkat dan batas verifikasi
+
+`status` menampilkan OS/arsitektur, Python, lokasi/version FFmpeg, FFprobe, dan Deno. `setup --check` memeriksa versi dependensi terhadap lock dan identitas environment. Jika pemeriksaan gagal, jalankan setup normal di perangkat tujuan.
+
+Pengujian native Windows pada CI memakai **Windows Server 2025 x64**, bukan Windows 11. Pengujian macOS menggunakan runner macOS 15 Intel/Apple Silicon. Pemeriksaan langsung Windows 11 dan Warp merupakan verifikasi terpisah; lihat TEST-REPORT.md untuk hasil yang benar-benar sudah berjalan.
+
+Nama hasil mempertahankan judul Unicode yang dipendekkan, ID, kualitas, mode, dan identitas varian. Karakter nama file terlarang Windows diganti; benturan file tanpa arsip menghasilkan pesan gagal, bukan overwrite. Untuk jalur Windows yang terlalu panjang, gunakan folder tools/media yang lebih pendek atau aktifkan dukungan long paths Windows/Python.
+
+Event/log memakai UTF-8; panel beralih ke plain ketika output dialihkan atau terminal tidak mendukung interaksi. `NO_COLOR` menonaktifkan warna. Ctrl+C menyimpan checkpoint, menghentikan worker dan turunannya, lalu mengembalikan 130. Kunci alat berlaku pula untuk setup/update/rollback/migrasi; `--wait` menunggu proses aktif selesai.

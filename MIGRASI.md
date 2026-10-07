@@ -1,10 +1,10 @@
-# Migrasi dan rollback YouTube Downloader 1.0.0
+# Migrasi, update, dan rollback YouTube Downloader 1.1.0
 
-Program, dependensi, dan catatan berada di folder tools. Media berada terpisah, default `~/Videos/YouTube`. Hentikan proses download sebelum memindahkan paket; mekanisme migrasi memakai kunci yang sama dan tidak menghentikan proses aktif.
+Program dan catatan berada dalam folder tools; media terpisah. Semua tindakan memakai `.state/run.lock`. Tunggu download selesai; `--wait` tersedia untuk pemeliharaan. Jangan menjalankan dua salinan tools bersamaan terhadap media yang sama.
 
-## Pindah folder pada Ubuntu yang sama
+## Pindah folder pada perangkat yang sama
 
-Tujuan harus kosong dan berada di luar folder sumber. Migrasi menyalin paket beserta settings, job, database, cadangan, dan file parsial; sumber tetap ada. Lingkungan Python dibuat ulang supaya tidak membawa jalur absolut dari lokasi lama. Deno yang sudah terpasang dapat dipakai kembali setelah pemeriksaan versi/arsitektur.
+Tujuan harus kosong di luar sumber. Migrasi menyalin program/settings/job/arsip/cadangan/file parsial, mengecualikan `.venv`, dan membuat ulang environment. Runtime hanya dipakai kembali jika metadata platform sesuai dan pemeriksaan versinya berhasil. Sumber tetap ada; media tetap di tempat semula.
 
 ```bash
 cd /jalur/tools-lama
@@ -15,110 +15,77 @@ bash setup.sh --check
 ./youtube-downloader preview
 ```
 
-Jika tujuan sudah berisi tools versi sebelumnya, gunakan `update.sh` dari paket rilis baru, bukan `migrate.sh`. Media tidak dipindahkan oleh `migrate.sh`; semua job lama tetap menunjuk ke lokasi hasil semula. Periksa status dan resume satu job sebelum menghapus paket sumber. Jangan menjalankan kedua salinan bersamaan: setelah dipisah, tiap folder mempunyai kunci dan database sendiri.
+Windows PowerShell: `.\migrate.cmd "$HOME\tools\youtube-downloader"`, lalu `.\setup.cmd --check`. Tujuan sudah berisi tools? Gunakan update dari paket rilis baru, bukan migrate. Setelah pindah, verifikasi satu resume sebelum menghapus sumber.
 
-## Pindah komputer
+## Pindah perangkat atau OS
 
-1. Pastikan proses sudah berhenti. Salin **seluruh folder tools termasuk file tersembunyi**, kecuali `.venv`, `.runtime`, dan `__pycache__`. Simpan `.state`, `settings.json`, `.bootstrap`, program, requirements, dan dokumentasi. Jangan hanya menyalin launcher.
-2. Salin seluruh `~/Videos/YouTube` secara terpisah, termasuk video/audio/SRT yang sudah selesai. Pertahankan nama file. Jika user dan lokasi hasil sama, checkpoint serta database tetap valid.
-3. Pada Ubuntu tujuan pasang Python 3.10+ dan FFmpeg/FFprobe, lalu jalankan setup untuk membuat ulang dependensi dan Deno sesuai arsitektur:
+1. Tunggu proses selesai. Salin seluruh paket termasuk file tersembunyi, settings dan `.state`. Kecualikan `.venv`, `.runtime`, `__pycache__`, `.git`, serta `run.lock`. `.bootstrap`, lock dependensi, runtime/release metadata, launcher, dan program wajib ikut.
+2. Salin **media terpisah** ke folder tujuan yang diinginkan. Pertahankan subfolder `video`, `audio`, `subtitle` dan nama file. Tidak ada konversi atau perubahan kualitas.
+3. Pasang Python standar 3.10–3.14 dan FFmpeg/FFprobe sesuai PANDUAN.md. Jalankan setup pada perangkat tujuan untuk environment dan Deno OS/arsitektur yang benar. Jangan memakai environment/binary Linux di Windows/macOS.
+4. Jalur dalam job dan arsip bersifat absolut. Bila akar media berubah, jalankan `rebase-media` di bawah sebelum resume.
+5. Login ulang Firefox pada perangkat tujuan. Rebase mengosongkan pilihan profil lama dalam job/settings yang dimigrasikan. Jangan menyalin cookie/profil sebagai bagian rilis. Untuk sumber yang tidak membutuhkan login, browser tidak diperlukan; jika perlu, gunakan `--browser firefox` pada perangkat tujuan.
 
-```bash
-sudo apt update
-sudo apt install python3 python3-venv ffmpeg
-cd "$HOME/tools/youtube-downloader"
-bash setup.sh
-bash setup.sh --check
-./youtube-downloader status
-./youtube-downloader preview
-```
+Default media: Ubuntu `~/Videos/YouTube`; macOS `~/Movies/YouTube`; Windows folder Videos pengguna/subfolder YouTube. Jika settings disalin, lokasi eksplisit lama tetap berlaku sampai dipetakan atau diubah untuk job baru. Resume menolak jalur asing dari OS lain sebelum download berjalan.
 
-4. Login ulang ke Firefox di komputer tujuan bila perlu. Profil/cookie komputer lama tidak dipindahkan otomatis.
-5. Jika folder home/output berbeda, job dan database lama memiliki **jalur absolut**. Default output `~/Videos/YouTube` mengikuti home baru, tetapi catatan lama tetap menunjuk ke tempat lama. Untuk hanya download baru, ubah `settings.json` dan mulai wizard baru. Untuk meneruskan job lama tanpa download ulang, pindahkan media lalu rebasing catatan secara eksplisit seperti di bawah.
+## Memetakan lokasi media tanpa download ulang
 
-### Rebasing media ketika home berubah
+Aksi ini **tidak memindahkan atau menimpa media**. Salin file dahulu. `--from` memakai akar absolut lama persis, format Windows atau POSIX diterima pada semua OS. `--to` memakai folder lokal yang sudah ada.
 
-Lakukan setelah menyalin media ke tujuan baru dan sebelum resume. Jalankan dari folder tools tujuan, ketika tidak ada proses lain. Ganti `OLD` dan `NEW` dengan akar media lama/baru yang persis. Script ini memakai kunci alat, membuat cadangan job/database/settings di `.state`, memeriksa file media tercatat di tujuan, dan hanya mengganti jalur yang berada di bawah `OLD`.
+Ubuntu/macOS, contoh dari Windows:
 
 ```bash
-./.venv/bin/python - <<'PY'
-from pathlib import Path
-import json, shutil, sqlite3, time
-from store import STATE, BASE, lock, write_json
-OLD = Path('/home/USER_LAMA/Videos/YouTube').resolve()
-NEW = Path.home() / 'Videos/YouTube'
-NEW = NEW.resolve()
-
-def remap(value):
-    if isinstance(value, dict):
-        return {k: remap(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [remap(v) for v in value]
-    if isinstance(value, str) and value.startswith('/'):
-        p = Path(value)
-        if p.is_relative_to(OLD):
-            return str(NEW / p.relative_to(OLD))
-    return value
-
-with lock():
-    assert OLD != NEW and NEW.is_dir(), 'Periksa OLD/NEW dan salin media dahulu'
-    backup = STATE / ('media-paths-before-' + str(time.time_ns()))
-    backup.mkdir()
-    jobs = list((STATE / 'jobs').glob('*.json'))
-    pending = [(p, remap(json.loads(p.read_text()))) for p in jobs]
-    database = STATE / 'downloaded.sqlite3'
-    rows = []
-    if database.exists():
-        with sqlite3.connect(database) as db:
-            rows = [(rowid, remap(json.loads(payload))) for rowid, payload in db.execute('SELECT rowid,payload FROM results')]
-            for rowid, result in rows:
-                assert Path(result['path']).is_file(), 'Media tujuan belum lengkap: ' + result['path']
-                for track in result.get('subtitles', []):
-                    assert Path(track['path']).is_file(), 'SRT tujuan belum lengkap: ' + track['path']
-            with sqlite3.connect(backup / 'downloaded.sqlite3') as saved:
-                db.backup(saved)
-            with db:
-                db.executemany('UPDATE results SET path=?,payload=? WHERE rowid=?', [(result['path'], json.dumps(result), rowid) for rowid, result in rows])
-    for p, job in pending:
-        (backup / 'jobs').mkdir(exist_ok=True)
-        shutil.copy2(p, backup / 'jobs' / p.name)
-        write_json(p, job)
-    settings = BASE / 'settings.json'
-    if settings.exists():
-        shutil.copy2(settings, backup / 'settings.json')
-        write_json(settings, remap(json.loads(settings.read_text())))
-    print('Jalur dipindahkan. Cadangan:', backup)
-PY
+python3 maintenance.py rebase-media --from 'C:\Users\USER_LAMA\Videos\YouTube' --to "$HOME/Movies/YouTube" --dry-run
+python3 maintenance.py rebase-media --from 'C:\Users\USER_LAMA\Videos\YouTube' --to "$HOME/Movies/YouTube"
 ```
 
-Jika gagal sebelum pemeriksaan media selesai, tidak ada jalur yang diganti. Cadangan berada di `.state/media-paths-before-*`. Bila ada kegagalan setelah perubahan dimulai, pulihkan database/job/settings dari cadangan itu sebelum resume. Ini mengganti jalur catatan, bukan nama file/identitas varian atau isi media. File yang memang sudah dihapus boleh didownload ulang; untuk kondisi itu lebih sederhana mulai job baru.
+Windows PowerShell, contoh dari Ubuntu:
 
-## Pembaruan program
+```powershell
+python maintenance.py rebase-media --from '/home/USER_LAMA/Videos/YouTube' --to "$HOME\Videos\YouTube" --dry-run
+python maintenance.py rebase-media --from '/home/USER_LAMA/Videos/YouTube' --to "$HOME\Videos\YouTube"
+.\youtube-downloader.cmd resume ID_JOB --browser firefox
+```
 
-Gunakan paket rilis baru terpisah:
+Dry-run menampilkan jalur yang akan berubah, jumlah job/hasil, dan media/SRT yang belum tersedia. Benturan arsip atau nama ditolak tanpa perubahan. Penerapan memerlukan semua media/SRT tercatat yang dipetakan tersedia; bila file memang dihapus, buat job baru untuk pemulihan atau pulihkan file dahulu. Cadangan database/job/settings tersimpan di `.state/media-path-backups/`. Perubahan SQLite dan JSON dipulihkan bila penerapan gagal. Menjalankan ulang pemetaan yang sama tidak mengubah lagi catatan yang telah dipetakan.
+
+Identitas varian dan schema arsip tetap sama; resume melewati hasil valid di lokasi baru. Jika ingin membatalkan pemetaan, hentikan proses lalu salin kembali database, settings, dan job dari cadangan yang tercetak; jangan mencampur cadangan dari tahap yang berbeda. Salinan media tetap di tempatnya.
+
+## Update manual dan rollback
+
+Program tidak mencari atau memasang rilis baru otomatis. `setup --upgrade` memasang ulang versi dependensi yang dipatok rilis; itu bukan self-update program.
+
+Jalankan updater dari **paket rilis baru terpisah**, arahkan ke tools aktif:
 
 ```bash
 cd /jalur/paket-rilis-baru
-bash update.sh "$HOME/tools/youtube-downloader"
+bash update.sh "$HOME/tools/youtube-downloader" --wait
+cd "$HOME/tools/youtube-downloader"
+bash setup.sh --check
+./youtube-downloader status
 ```
 
-Program lama dan manifest disimpan di `.state/program-backups/`. `.state/last-update.json` mencatat versi dan cadangan terakhir. Settings/job/media bukan bagian yang diganti. Dependensi paket disesuaikan dengan `requirements.lock`, bukan otomatis melompat ke yt-dlp terbaru. `--wait` menunggu kunci alat bebas.
+Windows:
+
+```powershell
+cd 'C:\jalur\paket-rilis-baru'
+.\update.cmd "$HOME\tools\youtube-downloader" --wait
+cd "$HOME\tools\youtube-downloader"
+.\setup.cmd --check
+.\youtube-downloader.cmd status
+```
+
+Updater membuat cadangan file program di `.state/program-backups/`, mengganti program, lalu memeriksa dependensi. Gagal pemasangan memicu pemulihan program. Settings, job, database, dan media tidak diganti oleh update/rollback.
 
 ```bash
-cd "$HOME/tools/youtube-downloader"
 bash rollback.sh
 bash setup.sh --check
 ./youtube-downloader status
 ```
 
-Rollback terakhir bisa dijalankan sekali; memulihkan program dan dependensi. Ia tidak membatalkan download sukses, mengembalikan media yang dihapus, ataupun mengubah lokasi media. Rilis berikutnya wajib menjaga pembacaan arsip dan struktur `video/audio/subtitle`; jika ada perubahan schema, panduan rilis harus menyediakan migrasinya sebelum update.
+Windows padanannya `.\rollback.cmd`. Rollback terakhir dapat dijalankan satu kali. Cadangan **1.0.0 khusus Linux**: boleh dipulihkan di Linux, ditolak di Windows/macOS sebelum file diganti. Rollback tidak membatalkan media yang sukses atau pemetaan lokasi media. Cadangan program dari OS yang sama tetap bisa dipakai setelah migrate; riwayat cadangan lama lintas OS sebaiknya disimpan sebagai referensi, bukan dijalankan.
 
-## Check setelah pindah
+## Pemeriksaan setelah migrasi
 
-- Status menunjukkan folder tools dan media yang diharapkan.
-- Preview memperlihatkan blok/palet yang sama; tidak menggunakan jaringan.
-- Job dan database terbawa, media/SRT ada di lokasi tercatat.
-- Resume melewati varian yang sudah valid; varian lain tetap dapat diunduh.
-- File parsial tetap di `.state/temporary` agar yt-dlp dapat mencoba melanjutkan.
+Pastikan status menunjukkan lokasi program/media sesuai, `setup --check` lulus, dan preview tampil. Resume satu job dengan hasil yang sudah ada: harus dilewati tanpa download ulang. Coba satu hasil yang dihapus jika perlu pemulihan. File parsial tetap di `.state/temporary` untuk resume yt-dlp, tetapi keberhasilan melanjutkan byte bergantung pada server/sumber.
 
-Download media tidak mengandalkan folder Documents/Codex. Paket di home dapat dipakai terus; workspace merupakan salinan pengembangan. Tool X Bookmarks tetap terpisah.
+Paket selalu terpisah dari X Bookmarks. Folder Documents/Codex hanya salinan pengembangan; tools boleh dipasang permanen di home atau folder lokal pilihan.
