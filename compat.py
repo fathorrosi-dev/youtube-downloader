@@ -81,6 +81,8 @@ class WindowsJob:
         self.api.AssignProcessToJobObject.argtypes=[w.HANDLE,w.HANDLE];self.api.AssignProcessToJobObject.restype=w.BOOL
         self.api.OpenProcess.argtypes=[w.DWORD,w.BOOL,w.DWORD];self.api.OpenProcess.restype=w.HANDLE
         self.api.CloseHandle.argtypes=[w.HANDLE];self.api.CloseHandle.restype=w.BOOL
+        self.api.TerminateJobObject.argtypes=[w.HANDLE,w.UINT];self.api.TerminateJobObject.restype=w.BOOL
+        self.api.QueryInformationJobObject.argtypes=[w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.DWORD,ctypes.c_void_p];self.api.QueryInformationJobObject.restype=w.BOOL
         self.handle=self.api.CreateJobObjectW(None,None)
         if not self.handle:raise ctypes.WinError(ctypes.get_last_error())
         process=None
@@ -93,7 +95,18 @@ class WindowsJob:
         finally:
             if process:self.api.CloseHandle(process)
     def close(self):
-        if self.handle:self.api.CloseHandle(self.handle);self.handle=None
+        if not self.handle:return
+        from ctypes import wintypes as w
+        class Accounting(ctypes.Structure):
+            _fields_=[(name,ctypes.c_longlong) for name in ('User','Kernel','PeriodUser','PeriodKernel')]+[(name,w.DWORD) for name in ('Faults','Total','Active','Terminated')]
+        try:
+            self.api.TerminateJobObject(self.handle,130)
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                info=Accounting()
+                if not self.api.QueryInformationJobObject(self.handle,1,ctypes.byref(info),ctypes.sizeof(info),None) or info.Active==0:break
+                time.sleep(.02)
+        finally:self.api.CloseHandle(self.handle);self.handle=None
 
 
 class ProcessTree:

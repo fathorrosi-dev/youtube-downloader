@@ -7,7 +7,7 @@ from model import pick,tracks,default_language,variant
 from runner import run,WorkerError
 from store import STATE,write_json,probe,lock
 
-report=[];output=STATE/'smoke-media';started=time.time()
+report=[];output=STATE/'smoke-media'/str(time.time_ns());started=time.time()
 urls=[('single','https://www.youtube.com/watch?v=jNQXAC9IVRw',False),('short','https://www.youtube.com/shorts/18NGQq7p3LY',False),('playlist','https://www.youtube.com/playlist?list=PLt5yu3-wZAlSLRHmI1qNm0wjyVNWw1pCU',True)]
 with lock():
     for kind,url,playlist in urls:

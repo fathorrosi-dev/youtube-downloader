@@ -7,8 +7,8 @@ class Terminal:
         if no_color:env['NO_COLOR']='1'
         self.decoder=codecs.getincrementaldecoder('utf-8')('replace')
         if os.name=='nt':
-            from winpty import PtyProcess
-            self.p=PtyProcess.spawn(args,cwd=str(cwd),env=env,dimensions=(30,width),backend=1)
+            from winpty import PtyProcess,Backend
+            self.p=PtyProcess.spawn(args,cwd=str(cwd),env=env,dimensions=(30,width),backend=Backend.ConPTY)
         else:
             import pty,fcntl,termios,struct
             self.fd,slave=pty.openpty();fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',30,width,0,0))
