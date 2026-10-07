@@ -1,8 +1,21 @@
 # Verifikasi rilis 1.2.0
 
-Pengujian self-update sedang berjalan. Ditambahkan 15 tes protokol rilis stabil, autentikasi tanpa penyimpanan token, redirect tanpa kebocoran Authorization, checksum, validasi ZIP/versi/OS/Python, lock download, transaksi installer nyata dan rollback gagal, serta Ctrl+C yang ditunda sampai pemasangan selesai. Suite sekarang 52 tes termasuk 37 tes regresi.
+Selesai, 7 Oktober 2026. [Seluruh 12 job native lulus](https://github.com/fathorrosi-dev/youtube-downloader/actions/runs/37626359655), revisi kode `e383c9e`. Perubahan sesudahnya hanya dokumentasi.
 
-CI native 1.2.0 dan pemasangan home belum ditandai selesai. Paket tidak dipublikasikan sebagai rilis stabil sebelum semua job native lulus. Riwayat rilis sebelumnya:
+| Lingkungan native | Python 3.10 | Python 3.13 | Python 3.14 |
+|---|---|---|---|
+| Ubuntu 24.04 x64 | Lulus | Lulus | Lulus |
+| Windows Server 2025 x64 | Lulus | Lulus | Lulus |
+| macOS 15 Intel | Lulus | Lulus | Lulus |
+| macOS 15 Apple Silicon | Lulus | Lulus | Lulus |
+
+Suite memiliki 52 tes: 37 regresi + 15 self-update. Python 3.13 menjalankan seluruh 52 termasuk installer bersih dengan dependensi nyata; kombinasi lain menjalankan 51 dan melewati satu installer tersebut. Seluruh 52 tes lokal juga lulus; perbaikan metadata platform fixture diperiksa kembali lewat 15 tes lokal dan seluruh matriks CI.
+
+Tes baru mencakup rilis stabil/equal/downgrade, autentikasi tanpa penyimpanan token, redirect tanpa meneruskan Authorization ke CDN, checksum dan nama aset, validasi ZIP/versi/OS/Python, lock download, cleanup paket sementara, installer transaksi nyata, pemulihan setelah gagal, serta Ctrl+C yang ditunda sampai transaksi selesai dan mengembalikan 130. Regresi download/menu/progres/NO_COLOR/plain/Ctrl+C worker tetap lulus.
+
+Pengambilan aset dari repo GitHub privat sungguhan lulus: autentikasi, unduhan ZIP/SHA-256, redirect, dan ekstraksi aman. Paket CI yang sama dipasang dari aset privat ke home 1.1.0 → 1.2.0 dengan installer terisolasi dan backup 1.1.0. Tes HTTP/YouTube/FFmpeg sebelumnya tetap berlaku; perubahan ini tidak mengubah kualitas atau pemilihan media.
+
+Windows 11 pengguna, Warp langsung, dan Ubuntu ARM64 belum diperiksa. Verifikasi Windows native berlaku untuk Windows Server 2025 CI. Publikasi melalui job tag hanya dapat berlangsung setelah seluruh job native lulus; publikasi pertama dilakukan manual sesudah CI yang sama berhasil.
 
 ## Riwayat verifikasi 1.1.0
 

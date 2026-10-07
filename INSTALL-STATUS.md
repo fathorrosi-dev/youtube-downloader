@@ -1,6 +1,18 @@
 # Pemasangan YouTube Downloader 1.2.0
 
-Pembaruan self-update masih dalam verifikasi; home tetap 1.1.0 sampai pengujian wajib lulus. Catatan pemasangan sebelumnya:
+Selesai, 7 Oktober 2026. Home `~/tools/youtube-downloader` sudah 1.2.0. Paket diunduh dari aset repo GitHub privat, checksum dan metadata diperiksa, lalu dipasang memakai installer terisolasi dan kunci alat. Cadangan 1.1.0: `.state/program-backups/1791378947876993719`; journal `.state/last-update.json` menunjuk cadangan tersebut.
+
+- Seluruh 12 job CI native lulus; 52 tes termasuk regresi dan 15 tes self-update. Detail dan batas verifikasi ada di TEST-REPORT.md.
+- Dependensi, kualitas, struktur media, dan identitas arsip dipertahankan. Home belum memiliki settings/job/arsip/media pengguna saat pembaruan ini; file pemeliharaan dan backup saja ditambahkan.
+- Tidak ada perubahan pada tools X Bookmarks.
+- Program memakai satu perintah `./youtube-downloader update`; `update --check` memeriksa tanpa memasang, `update --wait` menunggu kunci bebas. Login GitHub perangkat ini sudah tersedia melalui GitHub CLI.
+- Panduan menjelaskan login tiap perangkat, rilis stabil, checksum, rollback, mode plain, serta Ctrl+C selama pemasangan.
+
+```bash
+cd "$HOME/tools/youtube-downloader"
+./youtube-downloader update --check
+./youtube-downloader update
+```
 
 ## Riwayat pemasangan 1.1.0
 

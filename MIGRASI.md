@@ -86,7 +86,7 @@ bash setup.sh --check
 ./youtube-downloader status
 ```
 
-Windows padanannya `.\rollback.cmd`. Rollback terakhir dapat dijalankan satu kali. Cadangan **1.0.0 khusus Linux**: boleh dipulihkan di Linux, ditolak di Windows/macOS sebelum file diganti. Rollback tidak membatalkan media yang sukses atau pemetaan lokasi media. Cadangan program dari OS yang sama tetap bisa dipakai setelah migrate; riwayat cadangan lama lintas OS sebaiknya disimpan sebagai referensi, bukan dijalankan.
+Windows padanannya `.\rollback.cmd`. Rollback terakhir dapat dijalankan satu kali. Rollback ke 1.1.0 mengembalikan program tanpa perintah self-update; untuk memasang kembali 1.2.0 gunakan paket manual. Cadangan **1.0.0 khusus Linux**: boleh dipulihkan di Linux, ditolak di Windows/macOS sebelum file diganti. Rollback tidak membatalkan media yang sukses atau pemetaan lokasi media. Cadangan program dari OS yang sama tetap bisa dipakai setelah migrate; riwayat cadangan lama lintas OS sebaiknya disimpan sebagai referensi, bukan dijalankan.
 
 ## Pemeriksaan setelah migrasi
 
