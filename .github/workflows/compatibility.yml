@@ -24,8 +24,10 @@ jobs:
       PYTHONIOENCODING: utf-8
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python }}
       - name: FFmpeg Ubuntu
@@ -77,11 +79,14 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: native
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.13'
       - name: Validate release tag
@@ -94,4 +99,20 @@ jobs:
       - name: Publish package and checksum
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 --verify-tag --title "YouTube Downloader $GITHUB_REF_NAME" --notes "Stable release. All 12 native compatibility jobs passed. Program-only package; settings, cookies, jobs, archives and media are excluded."
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Idempotent: a tag pushed again for a release that already exists must not fail,
+          # and published assets are never overwritten (installed copies verified against them).
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice title=Release already published::$TAG already has a release; existing assets are kept."
+            existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+            for file in dist/*.zip dist/*.sha256; do
+              if ! grep -qxF "$(basename "$file")" <<<"$existing"; then
+                echo "Uploading missing asset $(basename "$file")"
+                gh release upload "$TAG" "$file"
+              fi
+            done
+          else
+            gh release create "$TAG" dist/*.zip dist/*.sha256 --verify-tag --title "YouTube Downloader $TAG" --notes "Stable release. All 12 native compatibility jobs passed. Program-only package; settings, cookies, jobs, archives and media are excluded."
+          fi

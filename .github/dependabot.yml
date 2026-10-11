@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Keeps SHA-pinned actions current (and rewrites the "# vX.Y.Z" comment beside each pin),
+  # so runtime deprecations such as Node 20 -> 24 arrive as a pull request, not as a CI warning.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Jakarta
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
