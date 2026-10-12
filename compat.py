@@ -6,6 +6,7 @@ import ctypes
 import errno
 import os
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -349,3 +350,41 @@ def configure_terminal():
             continue
         atexit.register(api.SetConsoleMode, handle, mode.value)
     return ready
+
+
+MAX_LOG_BYTES = 5 * 1024**2
+
+
+def rotate_log(path, limit=MAX_LOG_BYTES):
+    """Keep one previous copy (path + '.1') so an append-only log cannot grow without bound."""
+    path = Path(path)
+    try:
+        if path.stat().st_size > limit:
+            path.replace(path.with_name(path.name + ".1"))
+    except OSError:
+        pass  # a missing or busy log is not a reason to stop a download
+
+
+def lock_requirements(text):
+    """Pinned requirements of a pip lock file, one string per package.
+
+    Backslash continuations are joined and --hash options and comments are dropped, so the
+    same parser serves both hashed and plain locks. Environment markers are kept."""
+    logical = []
+    current = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.endswith("\\"):
+            current += line[:-1] + " "
+            continue
+        logical.append(current + line)
+        current = ""
+    if current:
+        logical.append(current)
+    result = []
+    for line in logical:
+        line = re.sub(r"--hash=\S+", "", line.split(" #", 1)[0])
+        line = " ".join(line.split())
+        if line and not line.startswith("#") and "==" in line:
+            result.append(line)
+    return result

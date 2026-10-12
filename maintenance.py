@@ -16,7 +16,15 @@ import time
 import urllib.request
 import tarfile
 from pathlib import Path
-from compat import file_lock, python_path, deno_path, platform_key, environment_identity
+from compat import (
+    file_lock,
+    python_path,
+    deno_path,
+    platform_key,
+    environment_identity,
+    lock_requirements,
+    rotate_log,
+)
 
 BASE = Path(__file__).resolve().parent
 
@@ -26,6 +34,7 @@ def guard(root, wait=False):
 
 
 def run_logged(root, args):
+    rotate_log(root / ".state/setup.log")
     with (root / ".state/setup.log").open("a", encoding="utf-8") as log:
         result = subprocess.run(
             args,
@@ -192,12 +201,15 @@ def setup(root, check=False, upgrade=False):
             root,
             [str(py), "-c", script, str(wheel), "install", "--no-index", "--no-deps", str(wheel)],
         )
-    lines = [
-        line
-        for line in (root / "requirements.lock").read_text(encoding="utf-8").splitlines()
-        if "==" in line
-    ]
-    code = "from importlib.metadata import version; from pip._vendor.packaging.requirements import Requirement; import json,sys; rs=[Requirement(x) for x in json.loads(sys.argv[1])]; assert all(version(r.name) in r.specifier for r in rs if not r.marker or r.marker.evaluate())"
+    lines = lock_requirements((root / "requirements.lock").read_text(encoding="utf-8"))
+    # `packaging` is a pinned dependency of the environment, not pip's private vendored copy.
+    code = (
+        "import json, sys\n"
+        "from importlib.metadata import version\n"
+        "from packaging.requirements import Requirement\n"
+        "rs = [Requirement(x) for x in json.loads(sys.argv[1])]\n"
+        "assert all(version(r.name) in r.specifier for r in rs if not r.marker or r.marker.evaluate())\n"
+    )
     ready = (
         subprocess.run(
             [str(py), "-c", code, json.dumps(lines)],
@@ -218,6 +230,7 @@ def setup(root, check=False, upgrade=False):
                 "pip",
                 "install",
                 *(["--upgrade"] if upgrade else []),
+                "--require-hashes",
                 "-r",
                 str(root / "requirements.lock"),
             ],

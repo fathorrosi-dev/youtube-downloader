@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
-from compat import file_lock, platform_key, ProcessTree, worker_start
+from compat import file_lock, platform_key, ProcessTree, rotate_log, worker_start
 
 REPOSITORY = "fathorrosi-dev/youtube-downloader"
 API = "https://api.github.com/repos/" + REPOSITORY
@@ -253,6 +253,7 @@ def install_package(source, root, wait=False, say=print):
         nonlocal interrupted
         interrupted = True
 
+    rotate_log(logpath)
     with logpath.open("a", encoding="utf-8") as log:
         log.write("\nUpdate dimulai " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
         log.flush()

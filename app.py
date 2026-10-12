@@ -7,10 +7,10 @@ import time
 import platform
 import subprocess
 import shutil
-from compat import native_output, platform_key, deno_path, foreign_path
+from compat import native_output, platform_key, deno_path, foreign_path, lock_requirements
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from model import (
     VERSION,
     SelectionError,
@@ -467,29 +467,25 @@ def status(ui):
         ("Media", str(Path(settings()["output"]).expanduser())),
         ("Catatan", str(STATE)),
     ]
-    from pip._vendor.packaging.requirements import Requirement
-
-    for line in (BASE / "requirements.lock").read_text(encoding="utf-8").splitlines():
-        if "==" not in line:
-            continue
+    try:
+        from packaging.requirements import Requirement
+    except ImportError:
+        Requirement = None
+        rows.append(("packaging", "belum terpasang · jalankan setup"))
+    pins = lock_requirements((BASE / "requirements.lock").read_text(encoding="utf-8"))
+    for line in pins if Requirement else []:
         dependency = Requirement(line)
         if dependency.marker and not dependency.marker.evaluate():
             continue
         try:
             actual = version(dependency.name)
-            rows.append(
-                (
-                    dependency.name,
-                    actual
-                    + (
-                        " · TIDAK SESUAI " + str(dependency.specifier)
-                        if actual not in dependency.specifier
-                        else ""
-                    ),
-                )
-            )
-        except Exception:
+        except PackageNotFoundError:
             rows.append((dependency.name, "belum terpasang"))
+            continue
+        mismatch = " · TIDAK SESUAI " + str(dependency.specifier)
+        rows.append(
+            (dependency.name, actual + ("" if actual in dependency.specifier else mismatch))
+        )
     for name in ("ffmpeg", "ffprobe", "deno"):
         binary = str(deno_path(BASE)) if name == "deno" else shutil.which(name)
         try:

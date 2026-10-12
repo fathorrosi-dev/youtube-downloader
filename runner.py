@@ -9,9 +9,12 @@ import sys
 import threading
 import uuid
 from store import BASE, STATE, write_json
-from compat import ProcessTree
+from compat import ProcessTree, rotate_log
 
-MAX_EVENT = 32 * 1024**2
+# One NDJSON line. A 5,000-item playlist with escaped non-Latin titles is roughly 4 MiB, so 8 MiB
+# leaves headroom; MAX_EVENT * MAX_QUEUE (128 MiB) bounds what the reader can buffer.
+MAX_EVENT = 8 * 1024**2
+MAX_QUEUE = 16
 
 
 class WorkerError(RuntimeError):
@@ -94,9 +97,10 @@ def run(request, on_event=None):
     tree = None
     done = None
     reader = None
-    messages = queue.Queue(64)
+    messages = queue.Queue(MAX_QUEUE)
     cancel = threading.Event()
     try:
+        rotate_log(STATE / "download.log")
         with (STATE / "download.log").open("a", encoding="utf-8") as log:
             flags = (
                 {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}

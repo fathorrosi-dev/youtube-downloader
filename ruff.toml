@@ -14,3 +14,4 @@ select = ["E4", "E7", "E9", "F", "W", "B"]
 [lint.per-file-ignores]
 # Tests extend sys.path before importing the modules under test.
 "tests/*" = ["E402"]
+"scripts/*" = ["E402"]

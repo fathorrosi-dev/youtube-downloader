@@ -243,6 +243,57 @@ class Wizard(unittest.TestCase):
             # The history line that replaces it: symbol, counter, label, answer.
             self.assertRegex(clean, r"◆ 2/5 Kualitas\s+B\r?\n")
 
+    def test_playlist_inspection_reports_progress_item_by_item(self):
+        messages = []
+
+        class Recorder:
+            def __init__(self):
+                self.answers = iter(("all", "video", 720, True))
+
+            def choose(self, *args, **kw):
+                return next(self.answers)
+
+            def checkboxes(self, label, choices):
+                return []
+
+            def say(self, *args):
+                pass
+
+            def table(self, headers, rows):
+                pass
+
+            def activity(self, message):
+                from contextlib import contextmanager
+
+                @contextmanager
+                def spinner():
+                    messages.append(message)
+                    yield messages.append
+
+                return spinner()
+
+        entries = []
+        infos = [{"playlist": True, "title": "P", "entries": entries}]
+        for name in ("a", "b", "c"):
+            info = synthetic()
+            info.update(
+                id=name, title=name.upper(), webpage_url="https://youtube.com/watch?v=" + name
+            )
+            entries.append({"url": info["webpage_url"], "title": name.upper()})
+            infos.append(info)
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(store, "STATE", Path(folder)),
+            patch.object(app, "inspect_url", side_effect=infos),
+        ):
+            app.wizard(Recorder(), "https://youtube.com/playlist?list=x", output=folder)
+        self.assertEqual(messages[0], "Mengambil informasi YouTube")
+        progress = [m for m in messages if m.startswith("Memeriksa kualitas dan subtitle")]
+        self.assertEqual(
+            progress[1:],
+            [f"Memeriksa kualitas dan subtitle · {n}/3" for n in (1, 2, 3)],
+        )
+
     def test_retry_hooks_known_wait_and_original_language(self):
         class E:
             def send(self, kind, **kwargs):

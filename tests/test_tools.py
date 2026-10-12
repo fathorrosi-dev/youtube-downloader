@@ -372,6 +372,13 @@ class Integration(unittest.TestCase):
         archive.put(key, result)
         self.assertIsNotNone(archive.get(key, "video-audio"))
 
+    def test_oversized_download_log_is_rotated_when_a_worker_starts(self):
+        log = self.state / "download.log"
+        log.write_bytes(b"x" * (5 * 1024**2 + 1))
+        self.inspect()
+        self.assertEqual((self.state / "download.log.1").stat().st_size, 5 * 1024**2 + 1)
+        self.assertLess(log.stat().st_size, 1024**2)
+
     def test_worker_crash_and_auth_errors(self):
         for name, category in (
             ("auth", "authentication"),

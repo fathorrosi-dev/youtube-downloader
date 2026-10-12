@@ -176,7 +176,7 @@ Profil khusus: `--browser 'firefox:/jalur/profil'`. Tools memakai pembaca cookie
 
 Retry jaringan dibatasi empat kali, timeout socket 30 detik. Tiga kegagalan sistem berturut-turut menghentikan batch. Subtitle menghormati `Retry-After` numerik dan retry dengan jeda. Batas permintaan YouTube/403 bisa tetap memerlukan menunggu dan sesi browser yang valid; jangan menganggap setiap penurunan speed sebagai Wi-Fi bermasalah.
 
-Detail ada di `.state/download.log` dan `.state/setup.log`. Log/checkpoint dapat berisi URL bertanda tangan atau informasi sesi; jangan membagikannya mentah. Tools tidak menghapus hasil sukses ketika ada kegagalan.
+Detail ada di `.state/download.log` dan `.state/setup.log`. Setiap log dipangkas saat mulai bila melebihi 5 MiB: isi lama dipindah ke `.log.1` (hanya satu salinan lama yang disimpan), sehingga log tidak tumbuh tanpa batas. Log/checkpoint dapat berisi URL bertanda tangan atau informasi sesi; jangan membagikannya mentah. Tools tidak menghapus hasil sukses ketika ada kegagalan.
 
 ## Setup dan pembaruan
 
@@ -188,7 +188,7 @@ sudo apt install ffmpeg python3 python3-venv
 bash setup.sh
 ```
 
-Setup membuat lingkungan Python lokal, memasang semua dependensi rilis meskipun yt-dlp global sudah ada, dan memasang Deno lokal dari distribusi resmi npm dengan verifikasi checksum SHA-512 yang dipatok (tanpa memerlukan Node/npm terpasang). Rilis 1.2.0 memakai yt-dlp 2026.8.19, EJS 0.8.0, Rich 14.3.4, Questionary 2.1.1, dan Deno 2.9.6; Python 3.10 memakai websockets 16.0 karena 17.2 mensyaratkan Python 3.11+; seluruh dependensi dipatok dalam `requirements.lock`. Ini tidak mengubah tools X Bookmarks.
+Setup membuat lingkungan Python lokal, memasang semua dependensi rilis meskipun yt-dlp global sudah ada (`pip install --require-hashes`: tiap file harus cocok dengan hash SHA-256 di `requirements.lock`, jadi paket yang diganti di PyPI ditolak), dan memasang Deno lokal dari distribusi resmi npm dengan verifikasi checksum SHA-512 yang dipatok (tanpa memerlukan Node/npm terpasang). Rilis 1.2.0 memakai yt-dlp 2026.8.19, EJS 0.8.0, Rich 14.3.4, Questionary 2.1.1, dan Deno 2.9.6; Python 3.10 memakai websockets 16.0 karena 17.2 mensyaratkan Python 3.11+; seluruh dependensi dipatok dalam `requirements.lock`. Ini tidak mengubah tools X Bookmarks.
 
 ```bash
 bash setup.sh --check
@@ -237,7 +237,7 @@ Referensi mekanisme sumber: [yt-dlp](https://github.com/yt-dlp/yt-dlp#embedding-
 
 `status` menampilkan OS/arsitektur, Python, lokasi/version FFmpeg, FFprobe, dan Deno. `setup --check` memeriksa versi dependensi terhadap lock dan identitas environment. Jika pemeriksaan gagal, jalankan setup normal di perangkat tujuan.
 
-Pengujian native Windows pada CI memakai **Windows Server 2025 x64**, bukan Windows 11. Pengujian macOS menggunakan runner macOS 15 Intel/Apple Silicon. Pemeriksaan langsung Windows 11 dan Warp merupakan verifikasi terpisah; lihat TEST-REPORT.md untuk hasil yang benar-benar sudah berjalan.
+Pengujian native Windows pada CI memakai **Windows Server 2025 x64**, bukan Windows 11. Pengujian macOS menggunakan runner macOS 15 Intel/Apple Silicon. Pemeriksaan langsung Windows 11 dan Warp merupakan verifikasi terpisah; lihat docs/TEST-REPORT.md (di repo, tidak ikut paket) untuk hasil yang benar-benar sudah berjalan.
 
 Nama hasil mempertahankan judul Unicode yang dipendekkan, ID, kualitas, mode, dan identitas varian. Karakter nama file terlarang Windows diganti; benturan file tanpa arsip menghasilkan pesan gagal, bukan overwrite. Untuk jalur Windows yang terlalu panjang, gunakan folder tools/media yang lebih pendek atau aktifkan dukungan long paths Windows/Python.
 
