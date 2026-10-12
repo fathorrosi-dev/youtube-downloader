@@ -12,6 +12,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
 import compat
+import fsutil
 import release_bundle
 import runner
 import self_update
@@ -103,6 +104,23 @@ class LogsAndBuffers(unittest.TestCase):
         )
         self.assertLess(len(line) + 1, runner.MAX_EVENT)
         self.assertLessEqual(runner.MAX_EVENT * runner.MAX_QUEUE, 128 * 1024**2)
+
+
+class TemporaryFolders(unittest.TestCase):
+    def test_remove_tree_deletes_nested_content_and_ignores_a_missing_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "YT 日本語" / ".state"
+            target.mkdir(parents=True)
+            (target / "download.log").write_text("log", encoding="utf-8")
+            fsutil.remove_tree(Path(folder) / "YT 日本語")
+            self.assertFalse((Path(folder) / "YT 日本語").exists())
+            fsutil.remove_tree(Path(folder) / "YT 日本語")
+
+    def test_cleanup_directory_leaves_nothing_for_tempfile_to_remove(self):
+        directory = tempfile.TemporaryDirectory()
+        (Path(directory.name) / "x").write_text("x", encoding="utf-8")
+        fsutil.cleanup_directory(directory)
+        self.assertFalse(Path(directory.name).exists())
 
 
 class ReleasePackage(unittest.TestCase):

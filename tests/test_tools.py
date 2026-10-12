@@ -22,6 +22,7 @@ import runner
 import app
 import ui
 from rich.console import Console
+from fsutil import cleanup_directory
 from terminal import Terminal
 
 
@@ -226,7 +227,7 @@ class Integration(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(cleanup_directory, self.temp)
         self.root = Path(self.temp.name)
         self.state = self.root / ".state"
         self.state.mkdir()

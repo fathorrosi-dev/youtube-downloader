@@ -22,6 +22,7 @@ import runner
 import media_migration
 import store
 import model
+from fsutil import cleanup_directory
 from terminal import Terminal
 from test_tools import synthetic
 
@@ -29,7 +30,7 @@ from test_tools import synthetic
 class Portable(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="YT 日本語 ")
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(cleanup_directory, self.tmp)
         self.root = Path(self.tmp.name).resolve()
         self.state = self.root / ".state"
         self.state.mkdir()
@@ -65,7 +66,9 @@ class Portable(unittest.TestCase):
         self.assertFalse(list(self.state.glob("worker-*.json")))
 
     def test_maximum_event_size(self):
-        self.worker('sys.stdout.write("x"*(32*1024**2+1));sys.stdout.flush()')
+        # One byte over the limit, as before. Writing far more would leave the worker blocked on a
+        # full pipe once the reader stops, so it would have to be killed instead of exiting.
+        self.worker('sys.stdout.write("x"*(%d));sys.stdout.flush()' % (runner.MAX_EVENT + 1))
         with self.assertRaisesRegex(runner.WorkerError, "besar"):
             runner.run({})
 
