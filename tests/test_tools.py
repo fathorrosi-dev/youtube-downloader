@@ -491,5 +491,123 @@ class Display(unittest.TestCase):
         self.assertIsNone(screen.byte_total)
 
 
+def rich_ui(width=80):
+    """A UI that renders through rich into a buffer, whatever the test runner's terminal is."""
+    screen = ui.UI(True)
+    screen.plain = False
+    screen.glyph = ui.GLYPHS
+    buffer = io.StringIO()
+    screen.console = Console(file=buffer, width=width, no_color=True, highlight=False)
+    return screen, buffer
+
+
+class Presentation(unittest.TestCase):
+    def test_clock_size_and_home_shortening(self):
+        self.assertEqual(ui.clock(213), "3:33")
+        self.assertEqual(ui.clock(3723), "1:02:03")
+        self.assertEqual(ui.clock(None), "0:00")
+        if sys.platform != "win32":
+            self.assertEqual(ui.tidy(Path.home() / "Downloads"), "~/Downloads")
+            self.assertEqual(ui.tidy("/elsewhere/file"), "/elsewhere/file")
+
+    def test_answered_line_keeps_symbol_counter_label_and_answer(self):
+        screen, buffer = rich_ui()
+        screen._answered("Kualitas", "1080p", (2, 5))
+        screen._answered("Link", "https://youtu.be/x")
+        first, second = buffer.getvalue().splitlines()
+        self.assertEqual(first.split(), ["◆", "2/5", "Kualitas", "1080p"])
+        self.assertEqual(second.split(), ["◆", "Link", "https://youtu.be/x"])
+        self.assertEqual(first.index("Kualitas"), second.index("Link"))
+        plain = ui.UI(True)
+        with redirect_stderr(io.StringIO()) as captured:
+            plain._answered("Kualitas", "1080p", (2, 5))
+        self.assertEqual(captured.getvalue(), "[2/5] Kualitas: 1080p\n")
+
+    def test_one_row_becomes_a_card_and_many_rows_a_truncated_table(self):
+        screen, buffer = rich_ui(60)
+        screen.table(("Video", "Kualitas"), [("Judul", "1080p")])
+        lines = buffer.getvalue().splitlines()
+        self.assertEqual([x.split() for x in lines], [["Video", "Judul"], ["Kualitas", "1080p"]])
+        screen, buffer = rich_ui(60)
+        long_title = "Judul yang sangat panjang " * 6
+        screen.table(
+            ("Video", "Kualitas", "Berkas"), [(long_title, "1080p", "MP4"), ("B", "720p", "MKV")]
+        )
+        lines = buffer.getvalue().splitlines()
+        self.assertTrue(all(len(x) <= 60 for x in lines))
+        self.assertIn("…", lines[1])
+        self.assertTrue(any("720p" in x for x in lines))
+
+    def test_report_lists_files_sizes_failures_and_technical_details(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "out"
+            (root / "video").mkdir(parents=True)
+            (root / "video/a.mp4").write_bytes(b"x" * 2048)
+            (root / "video/b.mp4").write_bytes(b"x" * 10)
+            job = {
+                "id": "abc123",
+                "status": "partial",
+                "output": str(root),
+                "items": [
+                    {
+                        "title": "A",
+                        "status": "complete",
+                        "result": {"path": str(root / "video/a.mp4")},
+                    },
+                    {
+                        "title": "B",
+                        "status": "partial",
+                        "result": {"path": str(root / "video/b.mp4")},
+                    },
+                    {"title": "C", "status": "failed", "error": {"message": "Private video"}},
+                    {"title": "D", "status": "pending"},
+                ],
+            }
+            screen = ui.UI(True)
+            with redirect_stderr(io.StringIO()) as captured:
+                screen.report(job, Path(folder) / "download.log")
+                screen.error("Ada item belum selesai", Path(folder) / "download.log")
+            lines = captured.getvalue().splitlines()
+            self.assertIn("[+] video/a.mp4 (2.0 KB)", lines)
+            self.assertIn("[!] video/b.mp4 (10 B · subtitle belum lengkap)", lines)
+            self.assertIn("[x] C (Private video)", lines)
+            self.assertIn("[-] D (belum diproses)", lines)
+            self.assertIn("Job: abc123 · partial", lines)
+            self.assertEqual(sum(x.startswith("Log: ") for x in lines), 1)
+            self.assertIn("! GAGAL · Ada item belum selesai", lines)
+            screen, buffer = rich_ui(70)
+            screen.report(job, Path(folder) / "download.log")
+            text = buffer.getvalue()
+            for expected in ("✓", "✗", "video/a.mp4", "Folder", "Job", "abc123", "Log"):
+                self.assertIn(expected, text)
+
+    def test_report_caps_long_batches(self):
+        items = [
+            {"title": f"T{i}", "status": "failed", "error": {"message": "x"}} for i in range(45)
+        ]
+        job = {"id": "j", "status": "partial", "output": "/tmp/none", "items": items}
+        with redirect_stderr(io.StringIO()) as captured:
+            ui.UI(True).report(job, "/tmp/none/log")
+        lines = captured.getvalue().splitlines()
+        self.assertEqual(sum(x.startswith("[x]") for x in lines), ui.MAX_REPORT_ROWS)
+        self.assertTrue(any(x.startswith("+15 item lain") for x in lines))
+
+    def test_session_exit_marks_failures_and_keeps_stop_wording(self):
+        screen, buffer = rich_ui(70)
+        with ui.Session(screen, 2) as session:
+            session.live = None
+            session.item_end("failed")
+            session.item_end("complete")
+        text = buffer.getvalue()
+        self.assertIn("! Selesai · 2/2 item", text)
+        self.assertIn("Disimpan 1 · Dilewati 0 · Gagal 1", text)
+
+    def test_activity_updates_its_message_in_both_modes(self):
+        with redirect_stderr(io.StringIO()) as captured:
+            with ui.UI(True).activity("Mulai") as update:
+                update("Mulai · 2/3")
+        self.assertEqual(captured.getvalue().splitlines(), ["Mulai", "Mulai · 2/3"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

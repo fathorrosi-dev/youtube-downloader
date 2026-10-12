@@ -4,9 +4,11 @@ from contextlib import contextmanager
 import os
 import sys
 import time
+from pathlib import Path
 from rich.console import Console, Group
 from rich.live import Live
 from rich.measure import Measurement
+from rich.padding import Padding
 from rich.progress import Progress, ProgressColumn, TextColumn
 from rich.table import Table, Column
 from rich.text import Text
@@ -99,6 +101,14 @@ def duration(seconds):
     )
 
 
+def clock(seconds):
+    """Length of a video as 3:42 or 1:02:03."""
+    seconds = max(0, int(seconds or 0))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+
 def size(number):
     number = max(0, number or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -107,8 +117,41 @@ def size(number):
         number /= 1024
 
 
+def tidy(path):
+    """A path for display: the home folder is shortened to ~ on POSIX systems."""
+    text = str(path)
+    home = str(Path.home())
+    if os.name != "nt" and home not in ("", "/") and (text == home or text.startswith(home + "/")):
+        return "~" + text[len(home) :]
+    return text
+
+
 class Cancelled(Exception):
     pass
+
+
+GLYPHS = {
+    "step": "◆",
+    "pointer": "›",
+    "ok": "✓",
+    "warn": "!",
+    "fail": "✗",
+    "skip": "–",
+    "stop": "■",
+    "arrow": "→",
+}
+# --plain output stays 7-bit so logs and legacy consoles never see box or symbol characters.
+PLAIN_GLYPHS = {
+    "step": "*",
+    "pointer": ">",
+    "ok": "+",
+    "warn": "!",
+    "fail": "x",
+    "skip": "-",
+    "stop": "#",
+    "arrow": "->",
+}
+MAX_REPORT_ROWS = 30
 
 
 class UI:
@@ -129,6 +172,8 @@ class UI:
             highlight=False,
         )
         self.depth = ColorDepth.DEPTH_1_BIT if "NO_COLOR" in os.environ else ColorDepth.DEPTH_24_BIT
+        self.glyph = PLAIN_GLYPHS if self.plain else GLYPHS
+        self._reported_log = None
         self.style = (
             questionary.Style(
                 [
@@ -138,62 +183,257 @@ class UI:
                     ("pointer", BLUE),
                     ("highlighted", BLUE),
                     ("selected", PINK),
+                    ("instruction", DIM),
                 ]
             )
             if "NO_COLOR" not in os.environ
             else questionary.Style([])
         )
 
+    # Output ---------------------------------------------------------------------------------
+
     def say(self, message, color=None):
+        """Print a line. A rich Text keeps its own styling; --plain prints its plain content."""
         if self.plain:
-            sys.stderr.write(str(message) + "\n")
+            sys.stderr.write((message.plain if isinstance(message, Text) else str(message)) + "\n")
             sys.stderr.flush()
+        elif isinstance(message, Text):
+            message.overflow = "fold"
+            self.console.print(message)
         else:
             self.console.print(Text(str(message), style=color, overflow="fold"))
 
-    def choose(self, title, options, default=None):
+    def banner(self, version):
+        line = Text()
+        line.append("YouTube Downloader", style=f"bold {PINK}")
+        line.append("  " + version, style=DIM)
+        self.say(line)
+
+    def error(self, message, log=None):
+        if self.plain:
+            self.say("! GAGAL · " + str(message))
+        else:
+            line = Text()
+            line.append(self.glyph["fail"] + " Gagal", style=f"bold {RED}")
+            line.append(" · " + str(message), style=RED)
+            self.say(line)
+        if log and str(log) != self._reported_log:
+            self.facts([("Log", tidy(log))])
+
+    def facts(self, rows):
+        """Technical references (folder, job, log) as dim label/value pairs."""
+        if self.plain:
+            for label, value in rows:
+                self.say(f"{label}: {value}")
+            return
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style=DIM, no_wrap=True, min_width=6)
+        grid.add_column(overflow="fold")
+        for label, value in rows:
+            grid.add_row(Text(label, style=DIM), Text(str(value)))
+        self.console.print(Padding(grid, (0, 0, 0, 2)))
+
+    def table(self, headers, rows):
+        rows = [tuple(str(value) for value in row) for row in rows]
+        if self.plain:
+            self.say(" | ".join(headers), BLUE)
+            for row in rows:
+                self.say(" | ".join(row))
+            return
+        if len(rows) == 1:
+            # One item reads better as a card than as a one-row table that wraps.
+            grid = Table.grid(padding=(0, 2))
+            grid.add_column(no_wrap=True)
+            grid.add_column(overflow="fold")
+            for header, value in zip(headers, rows[0], strict=True):
+                grid.add_row(Text(header, style=BLUE), Text(value))
+            self.console.print(Padding(grid, (0, 0, 0, 2)))
+            return
+        table = Table(box=None, show_edge=False, padding=(0, 1), pad_edge=False, expand=True)
+        ratios = {2: (2, 3), 3: (3, 3, 4)}.get(len(headers), (1,) * len(headers))
+        for index, header in enumerate(headers):
+            # The first column (a video title) is cut with an ellipsis; the others wrap.
+            table.add_column(
+                header,
+                header_style=BLUE,
+                overflow="ellipsis" if index == 0 else "fold",
+                no_wrap=index == 0,
+                ratio=ratios[index],
+            )
+        for row in rows:
+            table.add_row(*(Text(value) for value in row))
+        self.console.print(table)
+
+    @contextmanager
+    def activity(self, message):
+        """A spinner while work runs. It yields update(text) to change the message."""
+        if self.plain:
+            self.say(message)
+            yield self.say
+            return
+        spinner = Spinner("dots", text=Text(message, style=BLUE), style=PINK)
+
+        def update(text):
+            spinner.update(text=Text(text, style=BLUE))
+
+        with Live(
+            spinner,
+            console=self.console,
+            transient=True,
+            refresh_per_second=4,
+            redirect_stdout=False,
+            redirect_stderr=False,
+        ):
+            yield update
+
+    def report(self, job, log):
+        """What was saved where, then folder, job and log, once the batch has ended."""
+        root = Path(job["output"])
+        rows = []
+        for item in job["items"]:
+            status = item.get("status")
+            if status in ("complete", "partial") and item.get("result"):
+                path = Path(item["result"]["path"])
+                try:
+                    shown = path.relative_to(root).as_posix()
+                except ValueError:
+                    shown = str(path)
+                try:
+                    detail = size(path.stat().st_size)
+                except OSError:
+                    detail = "file tidak ditemukan"
+                if status == "partial":
+                    detail += " · subtitle belum lengkap"
+                rows.append(("warn" if status == "partial" else "ok", shown, detail))
+            elif status == "failed":
+                reason = (item.get("error") or {}).get("message") or "gagal"
+                rows.append(("fail", item["title"], reason))
+            else:
+                rows.append(("skip", item["title"], "belum diproses"))
+        hidden = max(0, len(rows) - MAX_REPORT_ROWS)
+        colors = {"ok": PINK, "warn": BLUE, "fail": RED, "skip": DIM}
+        if rows and self.plain:
+            for kind, name, detail in rows[:MAX_REPORT_ROWS]:
+                self.say(f"[{self.glyph[kind]}] {name} ({detail})")
+        elif rows:
+            grid = Table.grid(padding=(0, 1))
+            grid.add_column(width=1, no_wrap=True)
+            grid.add_column(overflow="fold")
+            for kind, name, detail in rows[:MAX_REPORT_ROWS]:
+                line = Text(name)
+                line.append(" · " + detail, style=DIM)
+                grid.add_row(Text(self.glyph[kind], style=colors[kind]), line)
+            self.console.print(Padding(grid, (1, 0, 1, 2)))
+        if hidden:
+            self.say(f"+{hidden} item lain; lihat file job untuk daftar lengkap.")
+        self._reported_log = str(log)
+        self.facts(
+            [
+                ("Folder", tidy(root)),
+                ("Job", f"{job['id']} · {job['status']}"),
+                ("Log", tidy(log)),
+            ]
+        )
+
+    # Prompts --------------------------------------------------------------------------------
+
+    def _answered(self, label, answer, step=None):
+        """The line a finished prompt leaves behind, so the screen reads as a history."""
+        if self.plain:
+            prefix = f"[{step[0]}/{step[1]}] " if step else ""
+            self.say(f"{prefix}{label}: {answer}")
+            return
+        grid = Table.grid(padding=(0, 1))
+        grid.add_column(width=1, no_wrap=True)
+        grid.add_column(min_width=3, no_wrap=True)
+        grid.add_column(min_width=15, no_wrap=True)
+        grid.add_column(overflow="fold")
+        grid.add_row(
+            Text(self.glyph["step"], style=PINK),
+            Text(f"{step[0]}/{step[1]}" if step else "", style=DIM),
+            Text(label, style=BLUE),
+            Text(str(answer), style=PINK),
+        )
+        self.console.print(grid)
+
+    def _message(self, title, step):
+        return f"{step[0]}/{step[1]}  {title}" if step else title
+
+    def _ask(self, question):
+        # The live prompt is erased once answered; _answered() prints the compact line instead.
+        question.application.erase_when_done = True
+        result = question.unsafe_ask()
+        if result is None:
+            raise Cancelled()
+        return result
+
+    @staticmethod
+    def _index(options, value):
+        for index, (_, candidate) in enumerate(options):
+            if candidate == value and type(candidate) is type(value):
+                return index
+        return None
+
+    def choose(self, title, options, default=None, step=None, label=None):
         if not sys.stdin.isatty():
             raise ValueError(
                 "Menu membutuhkan input terminal. Gunakan terminal interaktif atau resume ID_JOB."
             )
+        label = label or title
         if self.plain:
-            self.say(title, BLUE)
-            for i, (label, _) in enumerate(options, 1):
-                self.say(f"{i}. {label}")
+            self.say(self._message(title, step), BLUE)
+            for i, (text, _) in enumerate(options, 1):
+                self.say(f"{i}. {text}")
             while True:
                 self.say("Nomor pilihan (q untuk batal):")
                 answer = input().strip()
                 if answer.lower() == "q":
                     raise Cancelled()
                 if answer.isdigit() and 1 <= int(answer) <= len(options):
-                    return options[int(answer) - 1][1]
+                    index = int(answer) - 1
+                    break
                 self.say("Pilihan tidak valid", RED)
-        values = [questionary.Choice(label, value=value) for label, value in options]
-        result = questionary.select(
-            title, choices=values, default=default, style=self.style, color_depth=self.depth
-        ).unsafe_ask()
-        if result is None:
-            raise Cancelled()
-        return result
+        else:
+            index = self._ask(
+                questionary.select(
+                    self._message(title, step),
+                    choices=[
+                        questionary.Choice(text, value=i) for i, (text, _) in enumerate(options)
+                    ],
+                    default=self._index(options, default),
+                    qmark=self.glyph["step"],
+                    pointer=self.glyph["pointer"],
+                    instruction="↑↓ pilih · Enter lanjut · Ctrl+C batal",
+                    style=self.style,
+                    color_depth=self.depth,
+                )
+            )
+        self._answered(label, options[index][0], step)
+        return options[index][1]
 
-    def text(self, title, default=""):
+    def text(self, title, default="", step=None, label=None):
         if not sys.stdin.isatty():
             raise ValueError("Masukkan link melalui terminal interaktif.")
         if self.plain:
-            self.say(title, BLUE)
+            self.say(self._message(title, step), BLUE)
             return input().strip() or default
-        result = questionary.text(
-            title, default=default, style=self.style, color_depth=self.depth
-        ).unsafe_ask()
-        if result is None:
-            raise Cancelled()
-        return result.strip()
+        result = self._ask(
+            questionary.text(
+                self._message(title, step),
+                default=default,
+                qmark=self.glyph["step"],
+                style=self.style,
+                color_depth=self.depth,
+            )
+        ).strip()
+        self._answered(label or title, result, step)
+        return result
 
     def checkboxes(self, title, options):
         if self.plain:
             self.say(title, BLUE)
-            for i, (label, _) in enumerate(options, 1):
-                self.say(f"{i}. {label}")
+            for i, (text, _) in enumerate(options, 1):
+                self.say(f"{i}. {text}")
             from model import item_indices
 
             while True:
@@ -204,45 +444,21 @@ class UI:
                     return [options[i][1] for i in item_indices(answer, len(options))]
                 except ValueError as exc:
                     self.say(exc, RED)
-        result = questionary.checkbox(
-            title,
-            choices=[questionary.Choice(label, value=value) for label, value in options],
-            style=self.style,
-            instruction="Space pilih · Enter lanjut · Ctrl+C batal",
-            color_depth=self.depth,
-        ).unsafe_ask()
-        if result is None:
-            raise Cancelled()
-        return result
-
-    def table(self, headers, rows):
-        if self.plain:
-            self.say(" | ".join(headers), BLUE)
-            for row in rows:
-                self.say(" | ".join(map(str, row)))
-            return
-        table = Table(box=None, show_edge=False, padding=(0, 1))
-        for header in headers:
-            table.add_column(header, header_style=BLUE, overflow="fold")
-        for row in rows:
-            table.add_row(*(Text(str(v)) for v in row))
-        self.console.print(table)
-
-    @contextmanager
-    def activity(self, message):
-        if self.plain:
-            self.say(message)
-            yield None
-            return
-        with Live(
-            Spinner("dots", text=Text(message, style=BLUE), style=PINK),
-            console=self.console,
-            transient=True,
-            refresh_per_second=4,
-            redirect_stdout=False,
-            redirect_stderr=False,
-        ):
-            yield None
+        picked = self._ask(
+            questionary.checkbox(
+                title,
+                choices=[questionary.Choice(text, value=i) for i, (text, _) in enumerate(options)],
+                qmark=self.glyph["step"],
+                pointer=self.glyph["pointer"],
+                style=self.style,
+                instruction="Space pilih · Enter lanjut · Ctrl+C batal",
+                color_depth=self.depth,
+            )
+        )
+        names = [options[i][0] for i in picked]
+        summary = "tidak ada" if not names else ", ".join(names) if len(names) <= 3 else None
+        self._answered(title, summary or f"{len(names)} dipilih")
+        return [options[i][1] for i in picked]
 
 
 class Session:
@@ -412,16 +628,27 @@ class Session:
         self.clock.active(False)
         if self.live:
             self.live.stop()
-        label = (
-            "Dihentikan"
-            if exc_type in (KeyboardInterrupt, Cancelled)
-            else "Terhenti"
+        interrupted = exc_type in (KeyboardInterrupt, Cancelled)
+        label = "Dihentikan" if interrupted else "Terhenti" if exc_type else "Selesai"
+        glyph, color = (
+            ("stop", BLUE)
+            if interrupted
+            else ("fail", RED)
             if exc_type
-            else "Selesai"
+            else ("warn", RED)
+            if self.failed
+            else ("ok", PINK)
         )
-        self.ui.say(
+        line = Text()
+        if not self.ui.plain:
+            line.append(self.ui.glyph[glyph] + " ", style=color)
+        line.append(
             label
             + f" · {self.done}/{self.total} item · {duration(time.monotonic() - self.started)}",
-            BLUE,
+            style=BLUE,
         )
-        self.ui.say(f"Disimpan {self.saved} · Dilewati {self.skipped} · Gagal {self.failed}")
+        self.ui.say(line)
+        self.ui.say(
+            f"{'' if self.ui.plain else '  '}"
+            f"Disimpan {self.saved} · Dilewati {self.skipped} · Gagal {self.failed}"
+        )

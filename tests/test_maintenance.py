@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+import re
 import sys
 import tempfile
 import time
@@ -148,6 +149,99 @@ class Wizard(unittest.TestCase):
         self.assertEqual([x["choice"]["actual_quality"] for x in job["items"]], [1080, 720])
         self.assertTrue(any("turun dari 1080p" in row[1] for row in fake.rows))
         self.assertEqual(job["items"][1]["subtitles"][0]["key"], "en")
+
+    def run_wizard(self, answers, subtitles):
+        class Recorder:
+            def __init__(self):
+                self.answers = iter(answers)
+                self.prompts = []
+
+            def choose(self, title, options, default=None, step=None, label=None):
+                self.prompts.append((label, step))
+                return next(self.answers)
+
+            def checkboxes(self, label, choices):
+                return []
+
+            def say(self, *args):
+                pass
+
+            def table(self, headers, rows):
+                pass
+
+            def activity(self, *args):
+                from contextlib import nullcontext
+
+                return nullcontext()
+
+        info = synthetic()
+        info.update(id="a", title="A", webpage_url="https://youtube.com/watch?v=a")
+        if subtitles:
+            info["subtitles"] = {
+                "en": [{"url": "https://x/?lang=en", "ext": "vtt", "name": "English"}]
+            }
+        recorder = Recorder()
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(store, "STATE", Path(folder)),
+            patch.object(app, "inspect_url", return_value=info),
+        ):
+            app.wizard(recorder, "https://youtube.com/watch?v=a", output=folder)
+        return recorder.prompts
+
+    def test_settings_prompts_are_numbered_exactly_for_each_mode(self):
+        self.assertEqual(
+            self.run_wizard(["video-audio", 1080, "original", False, True], subtitles=True),
+            [
+                ("Unduh apa?", None),
+                ("Kualitas", (1, 4)),
+                ("Bahasa audio", (2, 4)),
+                ("Subtitle", (3, 4)),
+                ("Mulai?", (4, 4)),
+            ],
+        )
+        self.assertEqual(
+            self.run_wizard(["audio", "original", "original", False, True], subtitles=False),
+            [
+                ("Unduh apa?", None),
+                ("Bahasa audio", (1, 4)),
+                ("Format audio", (2, 4)),
+                ("Kualitas audio", (3, 4)),
+                ("Mulai?", (4, 4)),
+            ],
+        )
+        self.assertEqual(
+            self.run_wizard(["video", 720, True], subtitles=False),
+            [("Unduh apa?", None), ("Kualitas", (1, 2)), ("Mulai?", (2, 2))],
+        )
+
+    def test_finished_menu_leaves_symbol_counter_and_answer(self):
+        script = (
+            "from ui import UI; u=UI(); "
+            "r=u.choose('Pilih kualitas',[('A',1),('B',2)],step=(2,5),label='Kualitas'); "
+            "print('RESULT',r)"
+        )
+        with Terminal(
+            [sys.executable, "-c", script], BASE, extra={"PROMPT_TOOLKIT_NO_CPR": "1"}
+        ) as term:
+            data = ""
+            deadline = time.monotonic() + 15
+            sent = False
+            while time.monotonic() < deadline and term.running():
+                data += term.read(0.1)
+                if "Pilih kualitas" in data and not sent:
+                    time.sleep(0.3)
+                    term.write("\x1b[B")
+                    time.sleep(0.1)
+                    term.write("\r")
+                    sent = True
+            data += term.drain()
+            self.assertEqual(term.wait(), 0, data)
+            clean = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", data)
+            self.assertIn("RESULT 2", clean)
+            self.assertIn("2/5  Pilih kualitas", clean)  # the live prompt carries the counter
+            # The history line that replaces it: symbol, counter, label, answer.
+            self.assertRegex(clean, r"◆ 2/5 Kualitas\s+B\r?\n")
 
     def test_retry_hooks_known_wait_and_original_language(self):
         class E:

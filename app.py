@@ -29,7 +29,8 @@ from model import (
 )
 from store import BASE, STATE, lock, settings, new_job, load_job, save_job, Archive
 from runner import run, WorkerError
-from ui import UI, Session, Cancelled, BLUE, RED, size, duration
+from rich.text import Text
+from ui import UI, Session, Cancelled, BLUE, DIM, RED, clock, size, tidy
 
 
 def inspect_url(url, browser=None, playlist=False):
@@ -45,14 +46,43 @@ def format_label(f):
     return f"{f['format_id']} · {quality} · {f.get('fps') or '—'} fps · {f.get('dynamic_range') or 'SDR'} · {f.get('vcodec') or '—'} / {f.get('acodec') or '—'} · {f.get('language') or 'und'} · {f.get('abr') or f.get('tbr') or '—'} kbps"
 
 
+def settings_plan(mode, has_subtitles):
+    """The numbered prompts that follow the choice of mode, in the order they are asked."""
+    plan = []
+    if mode != "audio":
+        plan.append("quality")
+    if mode != "video":
+        plan.append("language")
+    if mode == "audio":
+        plan += ["audio_format", "audio_quality"]
+    if has_subtitles:
+        plan.append("subtitles")
+    plan.append("confirm")
+    return plan
+
+
+class Steps:
+    """Numbers the settings prompts. The mode is asked first and is not numbered because it
+    decides how many prompts follow, so every counter shown is exact."""
+
+    def __init__(self, total):
+        self.total = total
+        self.number = 0
+
+    def next(self):
+        self.number += 1
+        return (self.number, self.total)
+
+
 def wizard(ui, url, browser=None, output=None):
-    url = valid_url(url or ui.text("Tempel link YouTube:"))
+    url = valid_url(url or ui.text("Tempel link YouTube:", label="Link"))
     qs = parse_qs(urlparse(url).query)
     is_playlist = "list" in qs or urlparse(url).path == "/playlist"
     if is_playlist and ("v" in qs or urlparse(url).hostname == "youtu.be"):
         is_playlist = ui.choose(
             "Link berisi video dan playlist. Ambil yang mana?",
             [("Video ini saja", False), ("Playlist", True)],
+            label="Sumber",
         )
     with ui.activity("Mengambil informasi YouTube"):
         initial = inspect_url(url, browser, is_playlist)
@@ -60,7 +90,11 @@ def wizard(ui, url, browser=None, output=None):
         entries = initial["entries"]
         if not entries:
             raise ValueError("Playlist kosong atau tidak dapat diakses")
-        ui.say(f"{initial['title']} · {len(entries)} item", BLUE)
+        ui.say(
+            Text.assemble(
+                (initial["title"] or "Playlist", "bold"), (f" · {len(entries)} item", DIM)
+            )
+        )
         selection = ui.choose(
             "Pilih item playlist",
             [
@@ -68,13 +102,13 @@ def wizard(ui, url, browser=None, output=None):
                 ("Pilih dengan checkbox", "checkbox"),
                 ("Nomor/rentang", "range"),
             ],
+            label="Item",
         )
         if selection == "all":
             selected = entries
         elif selection == "checkbox":
             selected = ui.checkboxes(
-                "Space pilih · daftar bisa digulir",
-                [(f"{i + 1}. {e['title']}", e) for i, e in enumerate(entries)],
+                "Item playlist", [(f"{i + 1}. {e['title']}", e) for i, e in enumerate(entries)]
             )
         else:
             while True:
@@ -82,7 +116,8 @@ def wizard(ui, url, browser=None, output=None):
                     selected = [
                         entries[i]
                         for i in item_indices(
-                            ui.text("Nomor/rentang, misalnya 1,3,5-10:"), len(entries)
+                            ui.text("Nomor/rentang, misalnya 1,3,5-10:", label="Item"),
+                            len(entries),
                         )
                     ]
                     break
@@ -93,8 +128,12 @@ def wizard(ui, url, browser=None, output=None):
         metadata = []
         unavailable = []
         errors = 0
-        with ui.activity(f"Memeriksa kualitas dan subtitle {len(selected)} item"):
-            for entry in selected:
+        total = len(selected)
+        label = "Memeriksa kualitas dan subtitle"
+        with ui.activity(f"{label} · 0/{total}") as progress:
+            for number, entry in enumerate(selected, 1):
+                if progress:
+                    progress(f"{label} · {number}/{total}")
                 try:
                     info = inspect_url(entry["url"], browser)
                     metadata.append(info)
@@ -120,78 +159,17 @@ def wizard(ui, url, browser=None, output=None):
         raise ValueError("Tidak ada item yang dapat diunduh")
     if len(metadata) == 1:
         info = metadata[0]
-        ui.say(
-            f"{info['title']} · {duration(info.get('duration') or 0)} · {info.get('channel') or info.get('uploader') or 'YouTube'}",
-            BLUE,
-        )
+        details = [
+            clock(info.get("duration")),
+            info.get("channel") or info.get("uploader") or "YouTube",
+        ]
         largest = next((f for f in reversed(info["formats"]) if has_video(f)), None)
         if largest:
-            ui.say(
-                ("Portrait" if largest["height"] > largest["width"] else "Landscape")
-                + f" · {largest['width']} × {largest['height']}"
-            )
-    mode = ui.choose(
-        "Apa yang ingin diunduh?",
-        [
-            ("Video + audio", "video-audio"),
-            ("Audio saja", "audio"),
-            ("Video saja — tanpa suara", "video"),
-        ],
-    )
-    quality = "best"
-    manual = False
-    audio_format = "original"
-    if mode != "audio":
-        tiers = sorted(set(q for m in metadata for q in qualities(m)), reverse=True)
-        if not tiers:
-            raise ValueError("Tidak ada format video yang tersedia")
-        recommended = (
-            1080 if 1080 in tiers else max((q for q in tiers if q <= 1080), default=min(tiers))
-        )
-        options = [
-            (
-                "Kualitas maksimal"
-                + (" + audio terbaik" if mode == "video-audio" else "")
-                + " · Direkomendasikan",
-                "best",
-            )
-        ]
-        options += [
-            (
-                f"{q}p"
-                + (" · pilihan harian" if q == recommended else "")
-                + (" + audio terbaik" if mode == "video-audio" else ""),
-                q,
-            )
-            for q in tiers
-        ]
-        options += [("Pilih format secara detail per item", "manual")]
-        quality = ui.choose(
-            "Pilih kualitas (playlist boleh turun kualitas, tidak naik otomatis)",
-            options,
-            default="best",
-        )
-        manual = quality == "manual"
-        if manual:
-            quality = "best"
-    lang = "original"
-    if mode != "video":
-        available = sorted(set(lang for m in metadata for lang in languages(m)))
-        lang = ui.choose(
-            "Bahasa audio", [("Bahasa asli per video", "original")] + [(x, x) for x in available]
-        )
-        if mode == "audio":
-            audio_format = ui.choose(
-                "Format audio",
-                [
-                    ("Audio asli terbaik · tanpa konversi", "original"),
-                    ("MP3 · konversi lossy", "mp3"),
-                ],
-            )
-            manual = ui.choose(
-                "Pemilihan kualitas audio",
-                [("Audio terbaik otomatis", False), ("Pilih format/bitrate per item", True)],
-            )
+            shape = "Portrait" if largest["height"] > largest["width"] else "Landscape"
+            details.append(f"{shape} {largest['width']} × {largest['height']}")
+        ui.say(Text(info["title"], style="bold"))
+        ui.say(Text(" · ".join(details), style=DIM))
+    ui.say("")
     all_tracks = {}
     for m in metadata:
         for t in tracks(m):
@@ -201,10 +179,72 @@ def wizard(ui, url, browser=None, output=None):
                 else (t["language"], t["kind"], t["key"], t["origin"])
             )
             all_tracks.setdefault(identity, t)
+    mode = ui.choose(
+        "Apa yang ingin diunduh?",
+        [
+            ("Video + audio", "video-audio"),
+            ("Audio saja", "audio"),
+            ("Video saja — tanpa suara", "video"),
+        ],
+        label="Unduh apa?",
+    )
+    steps = Steps(len(settings_plan(mode, bool(all_tracks))))
+    quality = "best"
+    manual = False
+    audio_format = "original"
+    if mode != "audio":
+        tiers = sorted({q for m in metadata for q in qualities(m)}, reverse=True)
+        if not tiers:
+            raise ValueError("Tidak ada format video yang tersedia")
+        recommended = (
+            1080 if 1080 in tiers else max((q for q in tiers if q <= 1080), default=min(tiers))
+        )
+        with_audio = " + audio terbaik" if mode == "video-audio" else ""
+        options = [("Kualitas maksimal" + with_audio + " · Direkomendasikan", "best")]
+        options += [
+            (f"{q}p" + (" · pilihan harian" if q == recommended else "") + with_audio, q)
+            for q in tiers
+        ]
+        options += [("Pilih format secara detail per item", "manual")]
+        title = "Pilih kualitas"
+        if len(metadata) > 1:
+            title += " · playlist boleh turun kualitas, tidak naik otomatis"
+        quality = ui.choose(title, options, default="best", step=steps.next(), label="Kualitas")
+        manual = quality == "manual"
+        if manual:
+            quality = "best"
+    lang = "original"
+    if mode != "video":
+        available = sorted({lang for m in metadata for lang in languages(m)})
+        lang = ui.choose(
+            "Bahasa audio",
+            [("Bahasa asli per video", "original")] + [(x, x) for x in available],
+            step=steps.next(),
+            label="Bahasa audio",
+        )
+        if mode == "audio":
+            audio_format = ui.choose(
+                "Format audio",
+                [
+                    ("Audio asli terbaik · tanpa konversi", "original"),
+                    ("MP3 · konversi lossy", "mp3"),
+                ],
+                step=steps.next(),
+                label="Format audio",
+            )
+            manual = ui.choose(
+                "Pemilihan kualitas audio",
+                [("Audio terbaik otomatis", False), ("Pilih format/bitrate per item", True)],
+                step=steps.next(),
+                label="Kualitas audio",
+            )
     chosen = []
     if all_tracks:
         addon = ui.choose(
-            "Tambahan subtitle", [("Tanpa subtitle", False), ("Pilih bahasa/track subtitle", True)]
+            "Tambahan subtitle",
+            [("Tanpa subtitle", False), ("Pilih bahasa/track subtitle", True)],
+            step=steps.next(),
+            label="Subtitle",
         )
         if addon:
             names = {
@@ -212,8 +252,10 @@ def wizard(ui, url, browser=None, output=None):
                 "automatic": "Caption otomatis",
                 "translated": "Terjemahan otomatis",
             }
+            if mode == "audio":
+                ui.say(Text("Audio saja: subtitle disimpan sebagai file .srt.", style=DIM))
             chosen = ui.checkboxes(
-                "Subtitle · file SRT + track; audio saja menyimpan file SRT",
+                "Track subtitle",
                 [
                     (
                         f"{t['name']} · {names[t['kind']]}"
@@ -228,7 +270,7 @@ def wizard(ui, url, browser=None, output=None):
                 ],
             )
     else:
-        ui.say("Tidak ada subtitle yang dikembalikan YouTube; tambahan subtitle tidak tersedia.")
+        ui.say(Text("YouTube tidak mengembalikan subtitle untuk pilihan ini.", style=DIM))
     items = []
     rows = []
     for m in metadata:
@@ -244,6 +286,7 @@ def wizard(ui, url, browser=None, output=None):
                         for f in reversed(m["formats"])
                         if has_video(f) and not f.get("has_drm")
                     ],
+                    label="Format video",
                 )
             if mode != "video":
                 af = [
@@ -255,6 +298,7 @@ def wizard(ui, url, browser=None, output=None):
                     audio_id = ui.choose(
                         "Format audio · " + m["title"],
                         [(format_label(f), f["format_id"]) for f in af],
+                        label="Format audio",
                     )
         try:
             choice = pick(m, mode, quality, language, audio_format, video_id, audio_id)
@@ -306,13 +350,26 @@ def wizard(ui, url, browser=None, output=None):
         rows.append((m["title"], actual, details))
     if not items:
         raise ValueError("Tidak ada item yang memenuhi pilihan")
-    ui.table(("Video", "Kualitas", "Hasil"), rows)
     root = str(native_output(output or settings()["output"]))
-    ui.say("Hasil: " + root, BLUE)
-    if ui.choose("Mulai download?", [("Mulai", True), ("Batal", False)]) is False:
+    ui.say("")
+    if len(rows) == 1:
+        ui.table(("Video", "Kualitas", "Berkas", "Simpan di"), [(*rows[0], tidy(root))])
+    else:
+        ui.table(("Video", "Kualitas", "Berkas"), rows)
+        ui.say(Text.assemble(("Simpan di ", DIM), tidy(root)))
+    ui.say("")
+    if (
+        ui.choose(
+            "Mulai download?",
+            [("Mulai", True), ("Batal", False)],
+            step=steps.next(),
+            label="Mulai?",
+        )
+        is False
+    ):
         raise Cancelled()
     job = new_job(items, root, browser)
-    ui.say("Job tersimpan: " + job["id"], BLUE)
+    ui.say(Text.assemble(("Job tersimpan · ", DIM), (job["id"], BLUE)))
     return job
 
 
@@ -394,9 +451,7 @@ def execute(ui, job):
     finally:
         save_job(job)
         archive.close()
-        ui.say("Job: " + job["id"] + " · " + job["status"])
-        ui.say("Hasil: " + job["output"])
-        ui.say("Log: " + str(STATE / "download.log"))
+        ui.report(job, STATE / "download.log")
     if job["status"] != "complete":
         raise ValueError(
             "Ada item/subtitle belum selesai; resume " + job["id"] + " untuk mencoba lagi."
@@ -529,7 +584,8 @@ def main():
         if args.action == "status":
             status(ui)
             return 0
-        ui.say("YouTube Downloader · " + VERSION, BLUE)
+        ui.banner(VERSION)
+        ui.say("")
         if args.browser and not (args.browser == "firefox" or args.browser.startswith("firefox:")):
             raise ValueError("Pilihan browser: firefox atau firefox:/jalur/profil")
         with lock():
@@ -563,8 +619,7 @@ def main():
         )
         return 130
     except Exception as exc:
-        ui.say("! GAGAL · " + str(exc), RED)
-        ui.say("Log: " + str(STATE / ("update.log" if args.action == "update" else "download.log")))
+        ui.error(str(exc), STATE / ("update.log" if args.action == "update" else "download.log"))
         return 1
 
 

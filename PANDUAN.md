@@ -89,6 +89,8 @@ Wizard memerlukan terminal untuk menjawab menu. Jika output dialihkan ke file, t
 7. Subtitle bersifat opsional. Pilih satu atau beberapa track, lalu tinjau ringkasan judul, kualitas, FPS, SDR/HDR, container, audio, perkiraan ukuran, dan tujuan file.
 8. Pilih Mulai. ID job langsung disimpan agar proses dapat dilanjutkan.
 
+Setiap jawaban tetap tertinggal di layar sebagai satu baris riwayat, misalnya `◆ 2/5 Kualitas  1080p`: simbol pink, nomor langkah redup, label biru, jawaban pink. Pilihan jenis unduhan tidak bernomor karena menentukan berapa langkah yang menyusul, sehingga setiap nomor yang tampil akurat. Ringkasan satu video berbentuk kartu (judul, kualitas, berkas, folder tujuan); playlist berbentuk tabel dengan judul yang dipotong dan diakhiri `…`. Dengan `--plain` simbol diganti ASCII (`[2/5] Kualitas: 1080p`).
+
 Resolusi portrait dihitung dari sisi pendek: 1080×1920 ditampilkan sebagai 1080p. Video landscape maupun portrait mempertahankan orientasi, ukuran, FPS, dan codec sumber. Daftar dan estimasi bergantung pada format yang YouTube berikan saat pemeriksaan; ukuran yang belum diketahui tidak dibuat-buat.
 
 ## Hasil video + audio
@@ -152,7 +154,7 @@ Panel diperbarui di tempat yang sama, maksimal sekitar empat kali per detik:
 
 Pada terminal sempit, ukuran dipindah ke baris kecepatan. `NO_COLOR=1` mempertahankan blok tanpa warna. `--plain` tidak mencetak setiap pembaruan byte. Kegagalan selalu ditandai `! GAGAL`; merah pada bar bukan berarti gagal.
 
-Ctrl+C menghentikan worker dan FFmpeg, memulihkan kursor, mencatat checkpoint, dan keluar dengan kode 130. Setelah selesai/dihentikan ada ringkasan permanen, lokasi hasil, job, dan log.
+Ctrl+C menghentikan worker dan FFmpeg, memulihkan kursor, mencatat checkpoint, dan keluar dengan kode 130. Setelah selesai/dihentikan ada ringkasan permanen: tiap file dengan ukuran (✓ berhasil, ! subtitle belum lengkap, ✗ gagal beserta alasannya), folder hasil, ID job, dan lokasi log. Info teknis itu selalu tampil, tidak disembunyikan.
 
 ```bash
 ./youtube-downloader status
