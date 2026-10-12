@@ -1,0 +1,16 @@
+# Formatting and lint rules enforced by CI (.github/workflows/compatibility.yml).
+line-length = 100
+target-version = "py310"
+extend-exclude = [".venv", ".runtime", ".state"]
+
+[format]
+quote-style = "double"
+
+[lint]
+# Default rule set (E4, E7, E9, F) already rejects semicolon-joined statements (E702)
+# and one-line compound statements (E701), which keeps the code reviewable.
+select = ["E4", "E7", "E9", "F", "W", "B"]
+
+[lint.per-file-ignores]
+# Tests extend sys.path before importing the modules under test.
+"tests/*" = ["E402"]

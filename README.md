@@ -20,3 +20,7 @@ CI memakai runner OS native dan media HTTP lokal. Windows Server CI merupakan li
 Naikkan VERSION di model.py dan metadata release.json bersama dokumentasi. Jalankan tes lokal lalu push perubahan. Tag stabil berbentuk vX.Y.Z harus sesuai versi program. CI pada push tag menjalankan seluruh 12 job native; job publish hanya berjalan setelah semuanya lulus, membangun ZIP program-only + SHA-256 dan mengunggah GitHub Release. Self-update mengambil latest release stabil dari repo ini; commit di main saja tidak membuat pembaruan tersedia. Jangan memasukkan settings/cookie/state/media ke paket.
 
 Untuk menyiapkan paket lokal: `python3 release_bundle.py /jalur/output`. Publikasi manual juga wajib menunggu CI revisi kode yang sama lulus. Tidak perlu memperbarui pin dependensi kecuali perubahan tersebut sudah diuji sebagai bagian rilis baru.
+
+## Gaya kode
+
+CI menolak kode yang belum diformat. Sebelum commit: `python -m pip install ruff==0.17.0`, lalu `ruff format .` dan `ruff check .` (konfigurasi di `ruff.toml`). Satu pernyataan per baris; titik koma pemisah dan pernyataan majemuk satu baris ditolak oleh lint.

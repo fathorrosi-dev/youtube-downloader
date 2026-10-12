@@ -10,6 +10,24 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  lint:
+    name: Format and lint (ruff)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+      - name: Install ruff
+        run: python -m pip install ruff==0.17.0
+      - name: Format check
+        run: ruff format --check .
+      - name: Lint
+        run: ruff check .
+
   native:
     name: ${{ matrix.os }} Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
@@ -77,7 +95,7 @@ jobs:
   release:
     name: Publish verified stable release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: native
+    needs: [lint, native]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
