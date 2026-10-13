@@ -184,8 +184,8 @@ def inspect(request, events):
     return compact(info)
 
 
-def ffmpeg(args, events, stage):
-    events.send("stage", message=stage)
+def ffmpeg(args, events, stage, phase="finish"):
+    events.send("stage", message=stage, phase=phase)
     subprocess.run(
         ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", *args],
         check=True,
@@ -206,7 +206,7 @@ def subtitle_files(info, item, root, events, opts):
             if target.is_file() and target.stat().st_size:
                 saved.append({**track, "path": str(target)})
                 continue
-            events.send("stage", message="Mengambil subtitle · " + track["name"])
+            events.send("stage", message="Mengambil subtitle · " + track["name"], phase="subtitle")
             fs = info.get(track["origin"], {}).get(track["key"], [])
             formats = sorted(
                 [f for f in fs if f.get("ext") in ("vtt", "srt", "ttml")],
@@ -248,7 +248,10 @@ def subtitle_files(info, item, root, events, opts):
                 if error:
                     raise error
                 ffmpeg(
-                    ["-i", str(raw), "-c:s", "srt", str(temp)], events, "Menyiapkan subtitle SRT"
+                    ["-i", str(raw), "-c:s", "srt", str(temp)],
+                    events,
+                    "Menyiapkan subtitle SRT",
+                    "subtitle",
                 )
                 if not temp.stat().st_size:
                     raise ValueError("Subtitle kosong")
@@ -294,7 +297,7 @@ def download(request, events):
     existing = request.get("existing_file")
     if target.exists() and not existing:
         raise ValueError("Benturan hasil: file sudah ada tanpa catatan arsip; tidak ditimpa")
-    events.send("stage", message="Memeriksa format dan akses terbaru")
+    events.send("stage", message="Memeriksa format dan akses terbaru", phase="metadata")
     metadata_opts = {**opts, "skip_download": True}
     with yt_dlp.YoutubeDL(metadata_opts) as ydl:
         info = ydl.extract_info(item["url"], download=False)
@@ -322,6 +325,7 @@ def download(request, events):
             if format_id in paths:
                 paths[stream] = paths[format_id]
                 continue
+            events.send("stage", message="Mengunduh " + stream, phase=stream)
             events.stream_name = stream
             events.started = False
             local = {

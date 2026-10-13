@@ -77,7 +77,7 @@ def read_events(stream, messages, cancel):
             )
             invalid |= any(
                 k in event and not isinstance(event[k], str)
-                for k in ("message", "name", "stream", "error", "category")
+                for k in ("message", "name", "stream", "error", "category", "phase")
             )
             if invalid:
                 put(WorkerError("Nilai event worker tidak valid"))

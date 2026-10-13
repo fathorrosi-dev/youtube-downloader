@@ -1,4 +1,4 @@
-# YouTube Downloader 1.2.0
+# YouTube Downloader 1.3.0
 
 Tools terpisah dari X Bookmarks untuk video YouTube, Shorts, dan playlist. Rekomendasi utama adalah **kualitas maksimal + audio terbaik** yang tersedia dalam bahasa audio pilihan. Setiap pilihan resolusi juga mengambil pasangan video terbaik pada resolusi tersebut dan audio terbaik; 1440p bukan pasangan yang lebih rendah mutunya karena tidak berlabel rekomendasi.
 
@@ -156,13 +156,15 @@ Default dapat disimpan dalam `settings.json` saat tools berhenti:
 
 ## Progress dan penghentian
 
-Panel diperbarui di tempat yang sama, maksimal sekitar empat kali per detik:
+Panel diperbarui di tempat yang sama, sekitar 12 kali per detik. Worker hanya melapor sekitar empat kali per detik; di antara dua laporan, bar file digeser sesuai kecepatan terakhir (paling lama 0,3 detik, dan tidak pernah mundur), sehingga geraknya mulus tanpa menambah lalu lintas event.
 
 - Pink `#FFC2D4`: item playlist yang sudah ditangani, termasuk gagal/dilewati.
 - Red `#E8384F`: file video atau audio aktif. Bar direset ketika berganti stream.
 - Sky `#A8D8F0`: nama file, kecepatan, dan informasi pendukung.
 - Blok `█` terisi, `░` kosong. Ukuran tidak diketahui memakai tiga blok bergerak dan tanpa persen/ETA; animasi berhenti saat menunggu/merge/gagal.
 - Status menampilkan pemeriksaan, pengunduhan, retry, menunggu dengan countdown jika durasinya diketahui, dan penggabungan.
+- Baris `Tahap` menunjukkan posisi item yang sedang berjalan, misalnya `✓ Metadata → ● Video → ○ Audio → ○ Gabung`: ✓ selesai, ● berjalan, ○ menunggu, ✗ tahap yang gagal. Subtitle muncul hanya jika dipilih; untuk video saja atau audio saja tahap terakhir bernama `Simpan`. Tahap yang dilewati (misalnya stream yang sudah ada saat resume) dihitung selesai. Pada terminal sempit hanya tahap yang berjalan yang diberi nama.
+- Playlist (dua item atau lebih) menampilkan jendela 6 baris di bawah bar Item, dengan satu item selesai di atas item yang berjalan: ○ menunggu, ● berjalan, ✓ tersimpan, ! tersimpan tetapi subtitle belum lengkap, ✗ gagal, – dilewati (sudah ada di arsip). Baris disembunyikan pada terminal yang terlalu pendek untuk memuatnya bersama panel.
 
 Pada terminal sempit, ukuran dipindah ke baris kecepatan. `NO_COLOR=1` mempertahankan blok tanpa warna. `--plain` tidak mencetak setiap pembaruan byte. Kegagalan selalu ditandai `! GAGAL`; merah pada bar bukan berarti gagal.
 

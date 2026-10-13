@@ -90,6 +90,22 @@ class LogsAndBuffers(unittest.TestCase):
         self.assertIn("terlalu besar", str(first))
         self.assertIsNone(messages.get_nowait())
 
+    def test_stage_phase_is_passed_on_and_must_be_text(self):
+        def events(line):
+            messages = runner.queue.Queue()
+            runner.read_events(io.BytesIO(line), messages, runner.threading.Event())
+            found = []
+            while (item := messages.get_nowait()) is not None:
+                found.append(item)
+            return found
+
+        ok = events(b'{"type":"stage","message":"Mengunduh video","phase":"video"}\n')
+        self.assertEqual([e["phase"] for e in ok], ["video"])
+        for bad in (b"5", b"null", b"[]", b'{"a":1}'):
+            (error,) = events(b'{"type":"stage","phase":' + bad + b"}\n")
+            self.assertIsInstance(error, runner.WorkerError)
+            self.assertIn("tidak valid", str(error))
+
     def test_a_large_realistic_playlist_still_fits_and_memory_is_bounded(self):
         entries = [
             {

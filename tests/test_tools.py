@@ -182,6 +182,24 @@ class Selection(unittest.TestCase):
         self.assertEqual(model.container(video_only, []), "mp4")
         self.assertIsNone(video_only["audio_format_id"])
 
+    def test_phases_follow_the_mode_and_the_subtitles(self):
+        info = synthetic()
+
+        def plan(mode, subtitles=()):
+            item = {"choice": model.pick(info, mode, 1080), "subtitles": list(subtitles)}
+            return model.phases(item)
+
+        self.assertEqual(plan("video-audio"), ["metadata", "video", "audio", "finish"])
+        self.assertEqual(plan("video"), ["metadata", "video", "finish"])
+        self.assertEqual(plan("audio"), ["metadata", "audio", "finish"])
+        self.assertEqual(
+            plan("video-audio", [{}]), ["metadata", "video", "audio", "subtitle", "finish"]
+        )
+        # Items saved by an older version have no "subtitles" key at all.
+        self.assertEqual(
+            model.phases({"choice": {"mode": "audio"}}), ["metadata", "audio", "finish"]
+        )
+
     def test_codec_names(self):
         for raw, name in (
             ("avc1.640028", "H.264"),
@@ -387,6 +405,13 @@ class Integration(unittest.TestCase):
         )
         return result, events
 
+    @staticmethod
+    def announced(events):
+        """The stages the worker announced, in order, without repeats."""
+        return list(
+            dict.fromkeys(e["phase"] for e in events if e["type"] == "stage" and "phase" in e)
+        )
+
     def test_real_merge_video_only_audio_and_mp3(self):
         for mode, audio_format in (
             ("video-audio", "original"),
@@ -400,6 +425,8 @@ class Integration(unittest.TestCase):
             self.assertTrue(Path(result["path"]).is_file())
             self.assertTrue(any(x["type"] == "progress" for x in events))
             self.assertTrue(any(x["type"] == "stage" for x in events))
+            # The panel's stage row is drawn from model.phases, so the worker must follow it.
+            self.assertEqual(self.announced(events), model.phases(item))
             if mode == "video-audio":
                 self.assertEqual(Path(result["path"]).suffix, ".mp4")
             if mode != "audio":
@@ -443,10 +470,13 @@ class Integration(unittest.TestCase):
         result, events = self.download(item)
         self.assertEqual(len(result["missing"]), 1)
         self.assertEqual(len(result["subtitles"]), 2)
+        self.assertEqual(self.announced(events), model.phases(item))
         data = store.probe(result["path"], "video-audio")
         self.assertEqual(sum(s["codec_type"] == "subtitle" for s in data["streams"]), 2)
         result2, events2 = self.download(item, existing_file=result["path"])
         self.assertFalse(any(e["type"] == "start" for e in events2))
+        # Nothing is downloaded again: the stream stages are skipped, the order does not change.
+        self.assertEqual(self.announced(events2), ["metadata", "subtitle", "finish"])
         self.assertEqual(len(result2["missing"]), 1)
 
     def test_archive_skip_deleted_recovery_and_collision(self):
@@ -600,6 +630,97 @@ class Display(unittest.TestCase):
         self.assertEqual(screen.downloaded, 0)
         self.assertIsNone(screen.byte_total)
 
+    def test_smoother_fills_the_gap_between_reports_and_never_goes_back(self):
+        now = [0.0]
+        smooth = ui.Smoother(lambda: now[0])
+        self.assertEqual(smooth.value(), 0)
+        smooth.update(1000, 1000)
+        shown = []
+        for moment in (0.0, 0.1, 0.2, 0.3, 5.0):
+            now[0] = moment
+            shown.append(round(smooth.value()))
+        # It advances at the reported speed, and stops one HORIZON after the report.
+        self.assertEqual(shown, [1000, 1100, 1200, 1300, 1300])
+        # The next report is lower than the estimate: the bar holds instead of stepping back.
+        now[0] = 0.3
+        smooth.update(1100, 1000)
+        held = []
+        for moment in (0.3, 0.4, 0.5, 0.6):
+            now[0] = moment
+            held.append(round(smooth.value()))
+        self.assertEqual(held, [1300, 1300, 1300, 1400])
+        # A pause freezes the bar where it is; finish() fills it; reset() empties it.
+        smooth.freeze()
+        now[0] = 9.0
+        self.assertEqual(round(smooth.value()), 1400)
+        smooth.finish(2000)
+        self.assertEqual(smooth.value(), 2000)
+        smooth.reset()
+        self.assertEqual(smooth.value(), 0)
+        # A missing speed (the worker sends null before it has measured one) adds nothing.
+        smooth.update(10, None)
+        now[0] = 9.1
+        self.assertEqual(smooth.value(), 10)
+
+    def test_file_bar_moves_between_worker_reports(self):
+        now = [0.0]
+        screen = ui.Session(ui.UI(True), 1)
+        screen.smoother.now = lambda: now[0]
+        screen.smoother.reset()
+        screen.event({"type": "start", "name": "x", "stream": "video"})
+        screen.event({"type": "progress", "downloaded": 0, "total": 1000, "speed": 1000, "eta": 1})
+        column = screen.file.columns[1]
+
+        def empty_cells():
+            return column.render(screen.file.tasks[0]).text(40).plain.count("░")
+
+        cells = []
+        for moment in (0.0, 0.1, 0.2, 0.3, 0.6):
+            now[0] = moment
+            cells.append(empty_cells())
+        self.assertEqual(cells[0], 40)
+        self.assertEqual(cells[:4], sorted(set(cells[:4]), reverse=True))
+        self.assertEqual(cells[3], cells[4])
+        # A report that comes in below the estimate does not move the bar back.
+        now[0] = 0.3
+        screen.event({"type": "progress", "downloaded": 150, "total": 1000, "speed": 1000})
+        self.assertEqual(empty_cells(), cells[3])
+        # The end of the file fills the bar, and the next file starts empty.
+        screen.event({"type": "file_done", "downloaded": 1000, "total": 1000})
+        self.assertEqual(empty_cells(), 0)
+        screen.event({"type": "start", "name": "y", "stream": "audio"})
+        # No size yet: the moving block, not a filled bar.
+        bar = column.render(screen.file.tasks[0]).text(40).plain
+        self.assertEqual((bar.count("█"), bar.count("░")), (3, 37))
+
+    def test_unknown_size_block_moves_a_cell_per_frame(self):
+        def start(moment):
+            bar = ui.SolidBar(0, None, ui.RED, moment, indicator=True)
+            return bar.text(20).plain.index("█")
+
+        frame = 1 / ui.BAR_STEPS_PER_SECOND
+        self.assertEqual([start(frame * (n + 0.5)) for n in range(4)], [0, 1, 2, 3])
+        self.assertGreaterEqual(ui.FPS, ui.BAR_STEPS_PER_SECOND)
+
+    def test_every_live_display_redraws_at_the_shared_rate(self):
+        screen, _ = rich_ui()
+        with patch.object(ui, "Live") as live:
+            with ui.Session(screen, 1):
+                pass
+            with screen.activity("x"):
+                pass
+        rates = [call.kwargs["refresh_per_second"] for call in live.call_args_list]
+        self.assertEqual(rates, [ui.FPS, ui.FPS])
+        self.assertGreaterEqual(ui.FPS, 12)
+
+
+def panel(session, width=100, height=30):
+    """The lines the panel draws, at a fixed terminal size."""
+    buffer = io.StringIO()
+    console = Console(file=buffer, width=width, height=height, no_color=True, highlight=False)
+    console.print(session)
+    return buffer.getvalue().splitlines()
+
 
 def rich_ui(width=80):
     """A UI that renders through rich into a buffer, whatever the test runner's terminal is."""
@@ -711,6 +832,164 @@ class Presentation(unittest.TestCase):
         text = buffer.getvalue()
         self.assertIn("! Selesai · 2/2 item", text)
         self.assertIn("Disimpan 1 · Dilewati 0 · Gagal 1", text)
+
+    def test_stage_row_follows_the_worker_and_only_moves_forward(self):
+        screen, _ = rich_ui()
+        session = ui.Session(screen, 1, [{"title": "A"}])
+        self.assertEqual(len(panel(session)), 7)  # no item has started: no row yet
+
+        def row():
+            return next(x for x in panel(session) if x.startswith("Tahap")).split()
+
+        session.item_start(["metadata", "video", "audio", "finish"])
+        self.assertEqual(len(panel(session)), 8)
+        self.assertEqual(row()[1:], "● Metadata → ○ Video → ○ Audio → ○ Gabung".split())
+        session.event({"type": "stage", "message": "x", "phase": "video"})
+        self.assertEqual(row()[1:], "✓ Metadata → ● Video → ○ Audio → ○ Gabung".split())
+        # The audio stage is announced by its download, even if the stage event was missed.
+        session.event({"type": "start", "name": "n", "stream": "audio"})
+        self.assertEqual(row()[1:], "✓ Metadata → ✓ Video → ● Audio → ○ Gabung".split())
+        for event in (
+            {"type": "stage", "phase": "metadata"},  # never backwards
+            {"type": "stage", "phase": "bogus"},  # unknown stages are ignored
+            {"type": "stage", "message": "no phase at all"},
+            {"type": "notice", "message": "n", "phase": "finish"},  # only stage events count
+        ):
+            session.event(event)
+            self.assertEqual(row()[1:], "✓ Metadata → ✓ Video → ● Audio → ○ Gabung".split())
+        session.item_end("complete")
+        self.assertEqual(row()[1:], "✓ Metadata → ✓ Video → ✓ Audio → ✓ Gabung".split())
+
+    def test_stage_row_marks_the_failed_stage_and_names_the_last_stage(self):
+        screen, _ = rich_ui()
+        session = ui.Session(screen, 2, [{"title": "A"}, {"title": "B"}])
+        session.item_start(["metadata", "video", "audio", "subtitle", "finish"])
+        session.event({"type": "stage", "message": "x", "phase": "video"})
+        session.item_end("failed")
+        line = next(x for x in panel(session) if x.startswith("Tahap"))
+        self.assertEqual(
+            line.split()[1:], "✓ Metadata → ✗ Video → ○ Audio → ○ Subtitle → ○ Gabung".split()
+        )
+        # One stream only: nothing is merged, the last stage is just saving.
+        session.item_start(["metadata", "audio", "finish"])
+        line = next(x for x in panel(session) if x.startswith("Tahap"))
+        self.assertEqual(line.split()[1:], "● Metadata → ○ Audio → ○ Simpan".split())
+        # A skipped item never ran, so it leaves no stages behind.
+        skipped = ui.Session(screen, 1, [{"title": "A"}])
+        skipped.item_end("skipped")
+        self.assertFalse(any(x.startswith("Tahap") for x in panel(skipped)))
+
+    def test_stage_row_gives_up_names_before_it_overflows(self):
+        screen, _ = rich_ui()
+        session = ui.Session(screen, 1, [{"title": "A"}])
+        session.item_start(["metadata", "video", "audio", "subtitle", "finish"])
+        session.event({"type": "stage", "message": "x", "phase": "video"})
+        full = next(x for x in panel(session, 100) if x.startswith("Tahap"))
+        self.assertIn("Metadata", full)
+        for width in (60, 40, 30, 20):
+            lines = panel(session, width)
+            self.assertTrue(all(len(x) <= width for x in lines), (width, lines))
+            row = next(x for x in lines if x.startswith("Tahap"))
+            self.assertIn("●", row)
+            if width <= 40:
+                self.assertNotIn("Metadata", row)
+                self.assertIn("● Video", row)
+
+    def test_playlist_rows_show_every_state_and_slide_with_the_current_item(self):
+        screen, _ = rich_ui()
+        items = [{"title": f"Video {n}"} for n in range(1, 6)]
+        session = ui.Session(screen, 5, items)
+
+        def glyphs():
+            lines = panel(session)
+            return [x.split()[0] for x in lines if x.lstrip().startswith(tuple("○●✓✗–!"))]
+
+        self.assertEqual(glyphs(), ["○"] * 5)
+        for status in ("complete", "failed", "skipped", "partial"):
+            session.item_start(["metadata", "finish"])
+            session.item_end(status)
+        session.item_start(["metadata", "finish"])
+        self.assertEqual(glyphs(), ["✓", "✗", "–", "!", "●"])
+        rows = [x for x in panel(session) if "Video" in x]
+        self.assertEqual([x.split()[1] for x in rows], ["1", "2", "3", "4", "5"])
+        self.assertIn("Video 5", rows[-1])
+
+        many = ui.Session(screen, 12, [{"title": f"Video {n}"} for n in range(1, 13)])
+
+        def titles():
+            return [" ".join(x.split()[2:]) for x in panel(many) if "Video" in x]
+
+        self.assertEqual(titles(), [f"Video {n}" for n in range(1, 7)])
+        for _ in range(4):
+            many.item_start(["metadata", "finish"])
+            many.item_end("complete")
+        # One finished item stays above the current one; the rest of the window is what is next.
+        self.assertEqual(titles(), [f"Video {n}" for n in range(4, 10)])
+        for _ in range(7):
+            many.item_start(["metadata", "finish"])
+            many.item_end("complete")
+        self.assertEqual(titles(), [f"Video {n}" for n in range(7, 13)])
+        self.assertEqual(len(panel(many)), 7 + 1 + ui.WINDOW_ROWS)
+
+    def test_playlist_rows_are_left_out_when_they_add_nothing_or_do_not_fit(self):
+        screen, _ = rich_ui()
+        one = ui.Session(screen, 1, [{"title": "Only video"}])
+        self.assertFalse(any("Only video" in x for x in panel(one)))
+        many = ui.Session(screen, 8, [{"title": f"Video {n}"} for n in range(8)])
+        self.assertTrue(any("Video 0" in x for x in panel(many, height=30)))
+        # A terminal this short cannot hold the rows and the rest of the panel: Rich would cut
+        # the bottom of the panel off, so the rows go.
+        short = panel(many, height=12)
+        self.assertFalse(any("Video" in x for x in short))
+        self.assertEqual(len(short), 7)
+        # Items without a title fall back to their id, and never break the panel.
+        odd = ui.Session(screen, 3, [{"id": "abc"}, {}, {"title": None, "id": None}])
+        self.assertTrue(any("abc" in x for x in panel(odd)))
+
+    def test_panel_fits_every_width_with_plan_and_rows_in_both_glyph_sets(self):
+        for plain in (False, True):
+            for width in (20, 40, 60, 100, 160):
+                screen, _ = rich_ui()
+                if plain:
+                    screen.glyph = ui.PLAIN_GLYPHS
+                items = [{"title": "long " * 40, "id": str(n)} for n in range(9)]
+                session = ui.Session(screen, 9, items)
+                session.item_start(["metadata", "video", "audio", "subtitle", "finish"])
+                session.event({"type": "start", "name": "x" * 300, "stream": "video"})
+                session.event({"type": "progress", "downloaded": 5, "total": 10, "speed": 1})
+                lines = panel(session, width)
+                self.assertTrue(all(len(x) <= width for x in lines), (plain, width, lines))
+                self.assertEqual(len(lines), 7 + 1 + ui.WINDOW_ROWS)
+
+    def test_redrawing_while_events_arrive_never_fails(self):
+        screen, _ = rich_ui()
+        session = ui.Session(screen, 30, [{"title": f"Video {n}"} for n in range(30)])
+        failures = []
+
+        def worker():
+            try:
+                for item in range(30):
+                    session.item_start(["metadata", "video", "audio", "finish"])
+                    session.event({"type": "stage", "message": "x", "phase": "video"})
+                    session.event({"type": "start", "name": "n", "stream": "video"})
+                    for step in range(40):
+                        session.event(
+                            {"type": "progress", "downloaded": step, "total": 40, "speed": 5}
+                        )
+                    session.event({"type": "file_done"})
+                    session.item_end("failed" if item % 7 == 3 else "complete")
+            except Exception as exc:
+                failures.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        draws = 0
+        while thread.is_alive() or draws < 20:
+            lines = panel(session)
+            self.assertTrue(7 <= len(lines) <= 7 + 1 + ui.WINDOW_ROWS)
+            draws += 1
+        thread.join()
+        self.assertEqual(failures, [])
 
     def test_activity_updates_its_message_in_both_modes(self):
         with redirect_stderr(io.StringIO()) as captured:

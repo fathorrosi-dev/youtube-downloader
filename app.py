@@ -22,6 +22,7 @@ from model import (
     tracks,
     container,
     variant,
+    phases,
     item_indices,
     codec_name,
     compatible_audio,
@@ -444,7 +445,7 @@ def execute(ui, job):
     job["status"] = "running"
     save_job(job)
     try:
-        with Session(ui, len(job["items"])) as session:
+        with Session(ui, len(job["items"]), job["items"]) as session:
             try:
                 for item in job["items"]:
                     key = variant(item)
@@ -466,6 +467,7 @@ def execute(ui, job):
                         request["existing_file"] = previous["path"]
                     item["status"] = "running"
                     save_job(job)
+                    session.item_start(phases(item))
                     try:
                         result = run(request, session.event)
                         archive.put(key, result)
@@ -574,32 +576,59 @@ def status(ui):
 
 def preview(ui):
     ui.say("YouTube Downloader · preview simulasi", BLUE)
-    with Session(ui, 2) as session:
-        for index, stream in enumerate(("video", "audio")):
-            session.event({"type": "start", "name": "Contoh " + stream, "stream": stream})
-            for i in range(0, 101, 5):
-                session.event(
-                    {
-                        "type": "progress",
-                        "downloaded": i * 1048576,
-                        "total": 104857600,
-                        "speed": 10 * 1048576,
-                        "eta": (100 - i) / 10,
-                    }
-                )
-                time.sleep(0.035)
-            session.event({"type": "file_done"})
-            if index == 0:
-                session.event(
-                    {"type": "start", "name": "Ukuran belum diketahui", "stream": "media"}
-                )
-                time.sleep(0.25)
-                session.event(
-                    {"type": "wait", "message": "Menunggu · simulasi", "until": time.time() + 0.3}
-                )
-                time.sleep(0.3)
-            session.event({"type": "stage", "message": "Menggabungkan · simulasi"})
-            time.sleep(0.2)
+    items = [
+        {"title": "Contoh video yang sudah pernah diunduh", "choice": {"mode": "video-audio"}},
+        {"title": "Contoh video dan audio", "choice": {"mode": "video-audio"}},
+        {"title": "Contoh audio saja", "choice": {"mode": "audio"}},
+    ]
+
+    def stage(session, message, phase, pause=0.2):
+        session.event({"type": "stage", "message": message, "phase": phase})
+        time.sleep(pause)
+
+    def fetch(session, stream, name, unknown=False):
+        stage(session, "Mengunduh " + stream, stream, 0)
+        session.event({"type": "start", "name": name, "stream": stream})
+        if unknown:
+            # No size yet: a moving block instead of a percentage, then a pause with a countdown.
+            time.sleep(0.25)
+            session.event(
+                {"type": "wait", "message": "Menunggu · simulasi", "until": time.time() + 0.3}
+            )
+            time.sleep(0.3)
+        for i in range(0, 101, 5):
+            session.event(
+                {
+                    "type": "progress",
+                    "downloaded": i * 1048576,
+                    "total": 104857600,
+                    "speed": 10 * 1048576,
+                    "eta": (100 - i) / 10,
+                }
+            )
+            time.sleep(0.035)
+        session.event({"type": "file_done"})
+
+    with Session(ui, len(items), items) as session:
+        time.sleep(0.3)
+        session.item_end("skipped")
+        for item in items[1:]:
+            audio_only = item["choice"]["mode"] == "audio"
+            session.item_start(phases(item))
+            stage(session, "Memeriksa format dan akses terbaru", "metadata")
+            if not audio_only:
+                fetch(session, "video", "Contoh video")
+            fetch(
+                session,
+                "audio",
+                "Ukuran belum diketahui" if audio_only else "Contoh audio",
+                audio_only,
+            )
+            stage(
+                session,
+                "Menyiapkan audio" if audio_only else "Menggabungkan video + audio",
+                "finish",
+            )
             session.item_end("complete")
     ui.say("Preview selesai; tidak ada jaringan, file, atau download yang dibuat.")
 

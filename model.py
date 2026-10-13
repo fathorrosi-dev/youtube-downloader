@@ -5,7 +5,7 @@ import json
 import re
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 MODES = ("video-audio", "audio", "video")
 
 
@@ -222,6 +222,23 @@ def container(choice, subtitles):
     if subtitles:
         return "mkv"
     return "mp4" if plays_in_mp4 else "mkv"
+
+
+def phases(item):
+    """The stages the worker goes through for one item, in order.
+
+    The worker announces each one as a "stage" event whose "phase" is one of these keys. A stage
+    can be skipped (a stream that is already on disk); the order never changes."""
+    mode = item["choice"]["mode"]
+    plan = ["metadata"]
+    if mode != "audio":
+        plan.append("video")
+    if mode != "video":
+        plan.append("audio")
+    if item.get("subtitles"):
+        plan.append("subtitle")
+    plan.append("finish")
+    return plan
 
 
 def variant(item):

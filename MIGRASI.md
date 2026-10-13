@@ -1,4 +1,4 @@
-# Migrasi, update, dan rollback YouTube Downloader 1.2.0
+# Migrasi, update, dan rollback YouTube Downloader 1.3.0
 
 Program dan catatan berada dalam folder tools; media terpisah. Semua tindakan memakai `.state/run.lock`. Tunggu download selesai; `--wait` tersedia untuk pemeliharaan. Jangan menjalankan dua salinan tools bersamaan terhadap media yang sama.
 

@@ -23,6 +23,21 @@ BLUE = "#A8D8F0"
 DIM = "#94A3B8"
 EMPTY = "#334155"
 
+# Redraws per second of every live panel. The worker reports progress only about four times a
+# second; Smoother fills the frames in between, so a higher rate costs no extra events.
+FPS = 12
+# The unknown-size indicator moves one cell per frame.
+BAR_STEPS_PER_SECOND = 12
+# Rows of the playlist list, and the stages an item goes through (see model.phases).
+WINDOW_ROWS = 6
+PHASE_LABELS = {
+    "metadata": "Metadata",
+    "video": "Video",
+    "audio": "Audio",
+    "subtitle": "Subtitle",
+    "finish": "Gabung",
+}
+
 
 class AnimationClock:
     """Animation time advances only while a file is actively downloading."""
@@ -41,6 +56,42 @@ class AnimationClock:
         self.resumed_at = time.monotonic() if value else None
 
 
+class Smoother:
+    """A byte counter that moves between worker reports instead of jumping at each one.
+
+    Between two reports the counter keeps advancing at the last reported speed, but for no longer
+    than HORIZON seconds, so a stalled connection does not keep a bar crawling. It never moves
+    backwards within one file: a report below the estimate holds the bar until the real count
+    catches up. The state is one immutable tuple that is replaced as a whole, so the thread that
+    redraws the panel reads a consistent snapshot without a lock."""
+
+    HORIZON = 0.3
+
+    def __init__(self, now=time.monotonic):
+        self.now = now
+        self.state = (0.0, 0.0, now(), 0.0)
+
+    def value(self):
+        base, speed, stamp, floor = self.state
+        ahead = min(max(0.0, self.now() - stamp), self.HORIZON)
+        return max(floor, base + speed * ahead)
+
+    def update(self, downloaded, speed):
+        """A report from the worker. What is on screen right now becomes the new floor."""
+        self.state = (float(downloaded), max(0.0, float(speed or 0)), self.now(), self.value())
+
+    def freeze(self):
+        """Stop where the bar is, for a pause that has no byte counter (waiting, merging)."""
+        shown = self.value()
+        self.state = (shown, 0.0, self.now(), shown)
+
+    def finish(self, total):
+        self.state = (float(total), 0.0, self.now(), float(total))
+
+    def reset(self):
+        self.state = (0.0, 0.0, self.now(), 0.0)
+
+
 class SolidBar:
     """A one-cell-high bar measured against the space Rich allocates to it."""
 
@@ -54,7 +105,7 @@ class SolidBar:
         if self.total is None:
             count = min(3, width) if self.indicator else 0
             travel = width - count
-            step = int(self.animation_time * 8) % (2 * travel) if travel else 0
+            step = int(self.animation_time * BAR_STEPS_PER_SECOND) % (2 * travel) if travel else 0
             start = min(step, 2 * travel - step) if travel else 0
             bar.append("░" * start, EMPTY)
             bar.append("█" * count, self.color)
@@ -78,13 +129,15 @@ class SolidBar:
 
 
 class SolidBarColumn(ProgressColumn):
-    def __init__(self, color, clock=None):
+    """`value` replaces the task's own counter, e.g. with Smoother.value for the file bar."""
+
+    def __init__(self, color, clock=None, value=None):
         super().__init__(table_column=Column(ratio=1, no_wrap=True))
-        self.color, self.clock = color, clock
+        self.color, self.clock, self.value = color, clock, value
 
     def render(self, task):
         return SolidBar(
-            task.completed,
+            task.completed if self.value is None else self.value(),
             task.total,
             self.color,
             self.clock() if self.clock else 0,
@@ -139,6 +192,8 @@ GLYPHS = {
     "skip": "–",
     "stop": "■",
     "arrow": "→",
+    "pending": "○",
+    "active": "●",
 }
 # --plain output stays 7-bit so logs and legacy consoles never see box or symbol characters.
 PLAIN_GLYPHS = {
@@ -150,6 +205,18 @@ PLAIN_GLYPHS = {
     "skip": "-",
     "stop": "#",
     "arrow": "->",
+    "pending": ".",
+    "active": "*",
+}
+# How a playlist row and a stage are drawn: glyph colour, then the style of the name next to it.
+ROW_COLORS = {"pending": DIM, "active": BLUE, "ok": PINK, "warn": BLUE, "fail": RED, "skip": DIM}
+ROW_TITLES = {
+    "pending": DIM,
+    "active": f"bold {BLUE}",
+    "ok": DIM,
+    "warn": BLUE,
+    "fail": RED,
+    "skip": DIM,
 }
 MAX_REPORT_ROWS = 30
 
@@ -280,7 +347,7 @@ class UI:
             spinner,
             console=self.console,
             transient=True,
-            refresh_per_second=4,
+            refresh_per_second=FPS,
             redirect_stdout=False,
             redirect_stderr=False,
         ):
@@ -462,7 +529,14 @@ class UI:
 
 
 class Session:
-    def __init__(self, ui, total):
+    """The live panel of one batch.
+
+    Worker events arrive on the thread that runs the batch, while Rich redraws the panel from its
+    own refresh thread. Everything the panel draws from more than one value (the list of item
+    states, the stage pipeline, the smoothed counter) is an immutable tuple that is replaced as
+    a whole, never changed in place, so a redraw always sees a consistent snapshot."""
+
+    def __init__(self, ui, total, items=None):
         self.ui = ui
         self.total = total
         self.done = 0
@@ -471,6 +545,12 @@ class Session:
         self.failed = 0
         self.started = time.monotonic()
         self.clock = AnimationClock()
+        self.smoother = Smoother()
+        # One row per item of a playlist; see item_start() and item_end().
+        self.titles = tuple(str(x.get("title") or x.get("id") or "") for x in items or ())
+        self.kinds = ("pending",) * len(self.titles)
+        # (stages of the current item, index of the current one, "run" | "ok" | "fail")
+        self.pipeline = ((), 0, "run")
         self.message = "Menyiapkan"
         self.current = ""
         self.downloaded = 0
@@ -487,7 +567,7 @@ class Session:
         self.oid = self.overall.add_task("", total=total)
         self.file = Progress(
             TextColumn("File"),
-            SolidBarColumn(RED, self.clock),
+            SolidBarColumn(RED, self.clock, self.smoother.value),
             TextColumn("{task.fields[label]}"),
             expand=True,
         )
@@ -501,7 +581,7 @@ class Session:
                 self,
                 console=self.ui.console,
                 transient=True,
-                refresh_per_second=4,
+                refresh_per_second=FPS,
                 redirect_stdout=False,
                 redirect_stderr=False,
             )
@@ -509,6 +589,43 @@ class Session:
         else:
             self.ui.say(f"Download · {self.total} item")
         return self
+
+    def item_start(self, phases=()):
+        """The next item begins: light its row and its first stage, and clear the file bar.
+
+        `phases` is the plan from model.phases(); the worker then announces each stage."""
+        self.mark(self.done, "active")
+        self.pipeline = (tuple(phases), 0, "run")
+        self.clock.active(False, reset=True)
+        self.smoother.reset()
+        self.current = ""
+        self.downloaded = 0
+        self.byte_total = None
+        self.speed = 0
+        self.eta = None
+        self.until = None
+        self.empty_file_bar(indicator=False)
+        self.message = "Menyiapkan"
+
+    def empty_file_bar(self, indicator):
+        """Back to an empty bar of unknown size.
+
+        Progress.reset() would do, but it replaces every field of the task, and the panel is
+        redrawn from Rich's own thread: for a moment the label would be missing and the redraw
+        would raise. Updating single fields never leaves the task incomplete."""
+        self.file.update(self.fid, completed=0, indicator=indicator)
+        self.file.tasks[0].total = None
+
+    def mark(self, index, kind):
+        if 0 <= index < len(self.kinds):
+            self.kinds = self.kinds[:index] + (kind,) + self.kinds[index + 1 :]
+
+    def advance(self, phase):
+        """Move the pipeline to `phase`. Stages only move forward: one that is skipped (a stream
+        that was already downloaded, subtitles that were already saved) counts as done."""
+        plan, index, outcome = self.pipeline
+        if phase in plan and plan.index(phase) > index:
+            self.pipeline = (plan, plan.index(phase), outcome)
 
     def event(self, event):
         kind = event.get("type")
@@ -520,8 +637,10 @@ class Session:
             self.eta = None
             self.until = None
             self.clock.active(True, reset=True)
-            self.file.reset(self.fid, total=None, indicator=True)
+            self.smoother.reset()
+            self.empty_file_bar(indicator=True)
             self.message = "Mengunduh " + event.get("stream", "media")
+            self.advance(event.get("stream"))
         elif kind == "progress":
             self.clock.active(True)
             self.until = None
@@ -530,9 +649,8 @@ class Session:
             self.byte_total = event.get("total") or None
             self.speed = event.get("speed") or 0
             self.eta = event.get("eta")
-            self.file.update(
-                self.fid, completed=self.downloaded, total=self.byte_total, indicator=True
-            )
+            self.smoother.update(self.downloaded, self.speed)
+            self.file.update(self.fid, completed=self.downloaded, indicator=True)
             self.file.tasks[0].total = self.byte_total
         elif kind == "file_done":
             self.downloaded = (
@@ -542,13 +660,17 @@ class Session:
             self.eta = None
             self.until = None
             self.clock.active(False)
+            self.smoother.finish(max(1, self.downloaded))
             self.file.update(
                 self.fid, total=max(1, self.downloaded), completed=max(1, self.downloaded)
             )
             self.message = "File sementara selesai"
         elif kind in ("stage", "retry", "wait", "failure", "notice"):
             self.clock.active(False)
+            self.smoother.freeze()
             self.until = event.get("until") if kind == "wait" else None
+            if kind == "stage":
+                self.advance(event.get("phase"))
             self.message = event.get("message") or (
                 "Mencoba kembali"
                 if kind == "retry"
@@ -566,16 +688,81 @@ class Session:
 
     def item_end(self, status):
         self.clock.active(False)
+        self.smoother.freeze()
+        index = self.done
         self.done += 1
         if status in ("complete", "partial"):
             self.saved += 1
+            kind = "ok" if status == "complete" else "warn"
         elif status == "skipped":
             self.skipped += 1
+            kind = "skip"
         else:
             self.failed += 1
+            kind = "fail"
+        self.mark(index, kind)
+        plan, position, _ = self.pipeline
+        # A skipped item never ran, so no stages are left to show; a failed one keeps its stages
+        # with the stage that failed marked.
+        self.pipeline = (
+            ((), 0, "run")
+            if kind == "skip"
+            else (plan, position, "fail" if kind == "fail" else "ok")
+        )
         self.overall.update(self.oid, completed=self.done)
         if self.ui.plain:
             self.ui.say(f"Item {self.done}/{self.total} · {status}")
+
+    def window(self, height):
+        """The playlist rows around the current item: one finished item above it, the rest below.
+
+        Nothing is drawn for a single video, or when the terminal is too short to hold the rest
+        of the panel as well (Rich would cut the bottom of the panel off instead)."""
+        titles, kinds = self.titles, self.kinds
+        room = min(WINDOW_ROWS, (height or 0) - 10)
+        if len(titles) < 2 or room < 3:
+            return []
+        current = min(self.done, len(titles) - 1)
+        start = max(0, min(current - 1, len(titles) - room))
+        digits = len(str(len(titles)))
+        glyph = self.ui.glyph
+        rows = []
+        for index in range(start, min(len(titles), start + room)):
+            kind = kinds[index]
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append("  " + glyph[kind] + " ", ROW_COLORS[kind])
+            row.append(str(index + 1).rjust(digits) + " ", DIM)
+            row.append(titles[index], ROW_TITLES[kind])
+            rows.append(row)
+        return rows
+
+    def stages(self, width):
+        """`Tahap ✓ Metadata → ● Video → ○ Audio → ○ Gabung`; None until an item has started.
+
+        When that does not fit, only the stage in progress keeps its name."""
+        plan, position, outcome = self.pipeline
+        if not plan:
+            return None
+        glyph = self.ui.glyph
+        finish = "Gabung" if "video" in plan and "audio" in plan else "Simpan"
+        full = Text("Tahap ", no_wrap=True, overflow="ellipsis")
+        short = Text("Tahap ", no_wrap=True, overflow="ellipsis")
+        for index, phase in enumerate(plan):
+            if outcome == "ok" or index < position:
+                kind = "ok"
+            elif index == position:
+                kind = "active" if outcome == "run" else "fail"
+            else:
+                kind = "pending"
+            label = finish if phase == "finish" else PHASE_LABELS.get(phase, phase)
+            if index:
+                for line in (full, short):
+                    line.append(" " + glyph["arrow"] + " ", DIM)
+            for line, shown in ((full, True), (short, kind in ("active", "fail"))):
+                line.append(glyph[kind], ROW_COLORS[kind])
+                if shown:
+                    line.append(" " + label, ROW_TITLES[kind])
+        return full if full.cell_len <= width else short
 
     def __rich_console__(self, console, options):
         compact = options.max_width < 60
@@ -605,9 +792,12 @@ class Session:
         status = self.message + (
             f" · sisa {duration(self.until - time.time())}" if self.until else ""
         )
+        stages = self.stages(options.max_width)
         yield Group(
             self.overall,
+            *self.window(options.max_height),
             self.file,
+            *([stages] if stages else []),
             Text(self.current, style=BLUE, no_wrap=True, overflow="ellipsis"),
             Text(rate, style=BLUE, no_wrap=True, overflow="ellipsis"),
             Text(
