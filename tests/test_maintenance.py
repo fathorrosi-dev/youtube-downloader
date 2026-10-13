@@ -111,7 +111,7 @@ class Wizard(unittest.TestCase):
 
         class Fake:
             def __init__(self):
-                self.answers = iter(("all", "video-audio", 1080, "original", True, True))
+                self.answers = iter(("all", "video-audio", False, 1080, "original", True, True))
                 self.rows = []
 
             def choose(self, *args, **kw):
@@ -191,13 +191,14 @@ class Wizard(unittest.TestCase):
 
     def test_settings_prompts_are_numbered_exactly_for_each_mode(self):
         self.assertEqual(
-            self.run_wizard(["video-audio", 1080, "original", False, True], subtitles=True),
+            self.run_wizard(["video-audio", False, 1080, "original", False, True], subtitles=True),
             [
                 ("Unduh apa?", None),
-                ("Kualitas", (1, 4)),
-                ("Bahasa audio", (2, 4)),
-                ("Subtitle", (3, 4)),
-                ("Mulai?", (4, 4)),
+                ("Format file", (1, 5)),
+                ("Kualitas", (2, 5)),
+                ("Bahasa audio", (3, 5)),
+                ("Subtitle", (4, 5)),
+                ("Mulai?", (5, 5)),
             ],
         )
         self.assertEqual(
@@ -211,9 +212,104 @@ class Wizard(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            self.run_wizard(["video", 720, True], subtitles=False),
-            [("Unduh apa?", None), ("Kualitas", (1, 2)), ("Mulai?", (2, 2))],
+            self.run_wizard(["video", False, 720, True], subtitles=False),
+            [
+                ("Unduh apa?", None),
+                ("Format file", (1, 3)),
+                ("Kualitas", (2, 3)),
+                ("Mulai?", (3, 3)),
+            ],
         )
+
+    def compatible_wizard(self, info, answers, checked=False):
+        class Recorder:
+            def __init__(self):
+                self.answers = iter(answers)
+                self.rows = []
+                self.said = []
+                self.offered = {}
+
+            def choose(self, title, options, default=None, step=None, label=None):
+                self.offered[label] = [text for text, _ in options]
+                return next(self.answers)
+
+            def checkboxes(self, label, choices):
+                return [v for _, v in choices] if checked else []
+
+            def say(self, *args):
+                self.said += [str(a) for a in args]
+
+            def table(self, headers, rows):
+                self.rows += list(rows)
+
+            def activity(self, *args):
+                from contextlib import nullcontext
+
+                return nullcontext()
+
+        recorder = Recorder()
+        info.update(id="a", title="A", webpage_url="https://youtube.com/watch?v=a")
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(store, "STATE", Path(folder)),
+            patch.object(app, "inspect_url", return_value=info),
+        ):
+            job = app.wizard(recorder, "https://youtube.com/watch?v=a", output=folder)
+        return job, recorder
+
+    def test_compatible_mp4_is_chosen_stored_and_shown_with_its_codecs(self):
+        info = synthetic()
+        info["subtitles"] = {"en": [{"url": "https://x/?lang=en", "ext": "vtt", "name": "English"}]}
+        job, recorder = self.compatible_wizard(
+            info, ["video-audio", True, 1080, "original", True, True], checked=True
+        )
+        choice = job["items"][0]["choice"]
+        self.assertTrue(choice["compatible"])
+        self.assertEqual((choice["video_format"], choice["audio_format_id"]), ("1080", "a1"))
+        self.assertEqual(len(job["items"][0]["subtitles"]), 1)
+        # MP4 even with a subtitle chosen; the summary says which codecs go into it.
+        self.assertEqual(recorder.rows[0][2].split(" · ")[:2], ["MP4", "H.264 + AAC"])
+        self.assertIn(
+            "subtitle disimpan sebagai file .srt di folder subtitle", " ".join(recorder.said)
+        )
+        self.assertTrue(any("MP4 kompatibel" in text for text in recorder.offered["Format file"]))
+
+    def test_automatic_format_is_unchanged_and_shows_why_a_file_becomes_mkv(self):
+        job, recorder = self.compatible_wizard(
+            synthetic(), ["video-audio", False, 1080, "original", True]
+        )
+        choice = job["items"][0]["choice"]
+        self.assertNotIn("compatible", choice)
+        self.assertEqual((choice["video_format"], choice["audio_format_id"]), ("1080b", "a2"))
+        self.assertEqual(recorder.rows[0][2].split(" · ")[:2], ["MKV", "VP9 + Opus"])
+
+    def test_compatible_item_without_aac_is_kept_as_mkv_and_the_user_is_told(self):
+        info = synthetic()
+        info["formats"] = [f for f in info["formats"] if f.get("acodec") != "mp4a"]
+        job, recorder = self.compatible_wizard(info, ["video-audio", True, 1080, "original", True])
+        self.assertTrue(job["items"][0]["choice"]["compatible"])
+        self.assertEqual(recorder.rows[0][2].split(" · ")[:2], ["MKV", "H.264 + Opus"])
+        self.assertTrue(any("tidak punya pasangan video/audio" in t for t in recorder.said))
+
+    def test_compatible_detail_selection_only_lists_h264_av1_and_aac(self):
+        job, recorder = self.compatible_wizard(
+            synthetic(), ["video-audio", True, "manual", "original", "1080", "a1", True]
+        )
+        video = " ".join(recorder.offered["Format video"])
+        audio = " ".join(recorder.offered["Format audio"])
+        self.assertIn("avc1", video)
+        self.assertNotIn("vp9", video)
+        self.assertIn("mp4a", audio)
+        self.assertNotIn("opus", audio)
+        self.assertEqual(recorder.rows[0][2].split(" · ")[:2], ["MP4", "H.264 + AAC"])
+
+    def test_compatible_with_no_h264_or_av1_stops_with_a_clear_message(self):
+        info = synthetic()
+        for f in info["formats"]:
+            if f.get("vcodec") == "avc1":
+                f["vcodec"] = "vp09.00.40.08"
+        with self.assertRaisesRegex(ValueError, "H.264/AV1"):
+            self.compatible_wizard(info, ["video-audio", True])
 
     def test_finished_menu_leaves_symbol_counter_and_answer(self):
         script = (
@@ -248,7 +344,7 @@ class Wizard(unittest.TestCase):
 
         class Recorder:
             def __init__(self):
-                self.answers = iter(("all", "video", 720, True))
+                self.answers = iter(("all", "video", False, 720, True))
 
             def choose(self, *args, **kw):
                 return next(self.answers)
@@ -293,6 +389,19 @@ class Wizard(unittest.TestCase):
             progress[1:],
             [f"Memeriksa kualitas dan subtitle · {n}/3" for n in (1, 2, 3)],
         )
+
+    def test_audio_language_tag_is_converted_only_for_mp4(self):
+        # The MP4 muxer drops anything but three-letter codes, Matroska takes YouTube's own.
+        for code, mp4, mkv in (
+            ("en", "eng", "en"),
+            ("en-US", "eng", "en-US"),
+            ("id", "ind", "id"),
+            ("zh-Hans", "zho", "zh-Hans"),
+            ("eng", "eng", "eng"),
+            ("xx", None, "xx"),
+        ):
+            self.assertEqual(worker.audio_language(code, "mp4"), mp4, code)
+            self.assertEqual(worker.audio_language(code, "mkv"), mkv, code)
 
     def test_retry_hooks_known_wait_and_original_language(self):
         class E:

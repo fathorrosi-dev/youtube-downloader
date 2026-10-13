@@ -112,6 +112,89 @@ class Selection(unittest.TestCase):
         self.assertEqual(model.container(c, []), "mp4")
         self.assertEqual(model.container(c, [{}]), "mkv")
 
+    def test_compatible_mp4_prefers_h264_and_aac_over_a_higher_ranked_vp9_and_opus(self):
+        info = synthetic()
+        automatic = model.pick(info, quality=1080)
+        self.assertEqual((automatic["video_format"], automatic["audio_format_id"]), ("1080b", "a2"))
+        self.assertNotIn("compatible", automatic)
+        c = model.pick(info, quality=1080, compatible=True)
+        self.assertEqual((c["video_format"], c["audio_format_id"]), ("1080", "a1"))
+        self.assertIs(c["compatible"], True)
+        self.assertEqual(model.container(c, []), "mp4")
+        # Subtitles do not force Matroska here; they are kept as separate .srt files.
+        self.assertEqual(model.container(c, [{}]), "mp4")
+        self.assertEqual(model.container(automatic, [{}]), "mkv")
+        # A different choice, so a different archive identity, but the old one is untouched.
+        item = {"id": "x", "choice": automatic, "subtitles": []}
+        self.assertNotEqual(model.variant(item), model.variant({**item, "choice": c}))
+
+    def test_compatible_mp4_uses_av1_above_1080p_and_never_vp9(self):
+        info = synthetic()
+        for f in info["formats"]:
+            if f.get("height") in (1440, 4320):
+                f["vcodec"] = "vp09.00.50.08"
+            if f.get("height") == 2160:
+                f["vcodec"] = "av01.0.12M.08"
+        self.assertEqual(model.qualities(info, compatible=True), [2160, 1080, 720])
+        self.assertEqual(model.qualities(info), [4320, 2160, 1440, 1080, 720])
+        best = model.pick(info, quality="best", compatible=True)
+        self.assertEqual((best["video_format"], best["actual_quality"]), ("2160", 2160))
+        self.assertEqual(model.container(best, []), "mp4")
+        # 1440p exists only as VP9, so the nearest lower tier is used instead.
+        self.assertEqual(model.pick(info, quality=1440, compatible=True)["actual_quality"], 1080)
+
+    def test_compatible_mp4_prefers_h264_over_av1_at_the_same_resolution(self):
+        info = synthetic()
+        info["formats"].append(
+            {
+                "format_id": "1080av1",
+                "width": 1920,
+                "height": 1080,
+                "fps": 60,
+                "vcodec": "av01.0.09M.08",
+                "acodec": "none",
+            }
+        )
+        self.assertEqual(model.pick(info, quality=1080, compatible=True)["video_format"], "1080")
+
+    def test_compatible_mp4_edge_cases(self):
+        info = synthetic()
+        only_opus = {**info, "formats": [f for f in info["formats"] if f.get("acodec") != "mp4a"]}
+        c = model.pick(only_opus, quality=1080, compatible=True)
+        self.assertEqual(c["audio_format_id"], "a2")  # no AAC: the best stream is kept
+        self.assertEqual(model.container(c, []), "mkv")
+        only_vp9 = {
+            **info,
+            "formats": [
+                {**f, "vcodec": "vp09.00.40.08"} if f.get("vcodec") == "avc1" else f
+                for f in info["formats"]
+            ],
+        }
+        with self.assertRaisesRegex(model.SelectionError, "H.264/AV1"):
+            model.pick(only_vp9, quality=1080, compatible=True)
+        # A stream picked by hand is used as it is.
+        manual = model.pick(info, quality=1080, video_id="1080b", audio_id="a2", compatible=True)
+        self.assertEqual((manual["video_format"], manual["audio_format_id"]), ("1080b", "a2"))
+        self.assertEqual(model.container(manual, [{}]), "mkv")
+        audio = model.pick(info, mode="audio", compatible=True)
+        self.assertNotIn("compatible", audio)
+        video_only = model.pick(info, mode="video", quality=1080, compatible=True)
+        self.assertEqual(model.container(video_only, []), "mp4")
+        self.assertIsNone(video_only["audio_format_id"])
+
+    def test_codec_names(self):
+        for raw, name in (
+            ("avc1.640028", "H.264"),
+            ("vp09.00.40.08", "VP9"),
+            ("av01.0.08M.08", "AV1"),
+            ("hvc1.1.6.L93.B0", "H.265"),
+            ("mp4a.40.2", "AAC"),
+            ("opus", "Opus"),
+            ("ec-3", "EC-3"),
+            (None, "?"),
+        ):
+            self.assertEqual(model.codec_name(raw), name)
+
     def test_tracks_and_variants(self):
         info = {
             "subtitles": {
@@ -286,13 +369,13 @@ class Integration(unittest.TestCase):
     def inspect(self):
         return runner.run({"action": "inspect", "url": "fixture:sample"})
 
-    def item(self, mode="video-audio", subs=False, audio_format="original"):
+    def item(self, mode="video-audio", subs=False, audio_format="original", compatible=False):
         info = self.inspect()
         return {
             "id": "sample",
             "title": "Local fixture",
             "url": "fixture:sample",
-            "choice": model.pick(info, mode, 90, audio_format=audio_format),
+            "choice": model.pick(info, mode, 90, audio_format=audio_format, compatible=compatible),
             "subtitles": model.tracks(info) if subs else [],
             "status": "pending",
         }
@@ -325,6 +408,25 @@ class Integration(unittest.TestCase):
                     "h264",
                 )
             self.assertFalse((self.root / ".state/temporary" / model.variant(item)).exists())
+
+    def test_compatible_mp4_keeps_subtitles_outside_the_file_and_labels_the_language(self):
+        item = self.item(subs=True, compatible=True)
+        result, _ = self.download(item)
+        path = Path(result["path"])
+        self.assertEqual(path.suffix, ".mp4")
+        data = store.probe(path, "video-audio")
+        self.assertEqual(
+            [s["codec_type"] for s in data["streams"] if s["codec_type"] == "subtitle"], []
+        )
+        self.assertEqual(len(result["subtitles"]), 2)
+        for track in result["subtitles"]:
+            self.assertGreater(Path(track["path"]).stat().st_size, 0)
+            self.assertEqual(Path(track["path"]).suffix, ".srt")
+        audio = next(s for s in data["streams"] if s["codec_type"] == "audio")
+        self.assertEqual((audio["codec_name"], audio["tags"]["language"]), ("aac", "eng"))
+        # Index first: playback can start before the whole file has been read.
+        raw = path.read_bytes()
+        self.assertLess(raw.index(b"moov"), raw.index(b"mdat"))
 
     def test_subtitles_embedding_and_retry_without_redownload(self):
         item = self.item(subs=True)

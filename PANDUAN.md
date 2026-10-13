@@ -83,7 +83,7 @@ Wizard memerlukan terminal untuk menjawab menu. Jika output dialihkan ke file, t
 1. Tools mengambil judul, durasi, kanal, ukuran asli, dan format yang tersedia. Link video yang juga memuat playlist menawarkan video saja atau playlist.
 2. Playlist menawarkan semua item, checkbox, atau nomor/rentang seperti `1,3,5-10`. Metadata tiap item diperiksa sebelum ringkasan. Video private/deleted dapat dilewati.
 3. Pilih **Video + audio**, **Audio saja**, atau **Video saja — tanpa suara**.
-4. Video menawarkan kualitas maksimal, resolusi asli yang tersedia, atau pemilihan format detail per item. Tidak ada upscale. Pada playlist, target yang tidak tersedia turun ke resolusi terbaik di bawah target; perubahan terlihat dalam ringkasan. Item yang tidak memiliki resolusi di bawah target dilewati.
+4. Untuk video, pilih dulu **Format file**: *Otomatis* atau *MP4 kompatibel* (lihat bagian Hasil video + audio). Setelah itu video menawarkan kualitas maksimal, resolusi asli yang tersedia, atau pemilihan format detail per item. Tidak ada upscale. Pada playlist, target yang tidak tersedia turun ke resolusi terbaik di bawah target; perubahan terlihat dalam ringkasan. Item yang tidak memiliki resolusi di bawah target dilewati.
 5. Pilih bahasa asli per video atau bahasa audio/dub yang benar-benar tersedia. Jika dub pilihan tidak ada pada item playlist, item itu dilewati; tools tidak mengganti bahasa diam-diam. `und` berarti YouTube tidak memberi identitas bahasa.
 6. Audio saja menawarkan **audio asli terbaik** tanpa konversi atau **MP3** dengan konversi lossy. Bisa memilih format/bitrate secara detail.
 7. Subtitle bersifat opsional. Pilih satu atau beberapa track, lalu tinjau ringkasan judul, kualitas, FPS, SDR/HDR, container, audio, perkiraan ukuran, dan tujuan file.
@@ -97,13 +97,25 @@ Resolusi portrait dihitung dari sisi pendek: 1080×1920 ditampilkan sebagai 1080
 
 **Hasil akhirnya satu video biasa dengan suara.** Video dan audio terpisah hanya dipakai sementara, kemudian FFmpeg menggabungkannya tanpa mengubah kualitas sumber. File sementara yang sukses dibersihkan. Video saja benar-benar tanpa audio, termasuk jika sumber format awal sudah memiliki audio.
 
-Container dipilih sesuai codec: MP4 jika pasangan kompatibel, MKV untuk pasangan lain atau video dengan subtitle. MKV tetap satu file video dengan suara. Kualitas maksimal bisa memakai codec yang tidak didukung semua player; VLC/mpv biasanya lebih sesuai. MP3 merupakan pilihan konversi terpisah, bukan default kualitas terbaik.
+### Format file: Otomatis atau MP4 kompatibel
+
+**Otomatis** (bawaan) memilih video dan audio terbaik, lalu container sesuai codec: MP4 jika pasangan codec cocok, MKV untuk pasangan lain atau video dengan subtitle. YouTube biasanya menyimpan audio terbaik dalam Opus dan video resolusi tinggi dalam VP9 atau AV1, sehingga hasilnya sering MKV. MKV tetap satu file video dengan suara dan diputar baik di VLC dan mpv, tetapi QuickTime, iPhone, pemutar bawaan Windows, dan sebagian editor video sering tidak membukanya. Ringkasan sebelum mulai menampilkan container dan codec, misalnya `MKV · VP9 + Opus`.
+
+**MP4 kompatibel** memilih video H.264 dan audio AAC tanpa re-encode, sehingga hasilnya MP4 untuk iPhone, Mac, Windows, dan editor video.
+
+- YouTube tidak menyediakan H.264 di atas 1080p. Untuk 1440p dan 2160p tools memakai AV1, yang membutuhkan perangkat atau pemutar yang mendukungnya. Resolusi yang hanya ada dalam VP9 tidak ditawarkan pada mode ini.
+- Audio AAC berkualitas sedikit di bawah Opus terbaik. Jika sebuah item tidak punya audio AAC untuk bahasa yang dipilih, item itu tetap diunduh sebagai MKV dan ringkasan memberi tahu jumlahnya.
+- Subtitle tidak ditanam di MP4. Track tetap disimpan sebagai file `.srt` di folder `subtitle`.
+- Pada pemilihan format detail, hanya video H.264/AV1 dan audio AAC yang ditampilkan (audio lain ditampilkan jika AAC tidak ada).
+- Semua file MP4 diberi indeks di depan (`faststart`) agar cepat diputar, dan label bahasa audio ditulis tiga huruf (`eng`, `ind`) karena MP4 membuang kode dua huruf.
+
+Pilihan ini tidak berlaku untuk audio saja. MP3 merupakan pilihan konversi terpisah, bukan default kualitas terbaik.
 
 ## Subtitle
 
 Menu membedakan **CC asli**, **caption otomatis**, dan **terjemahan otomatis**, beserta bahasa sumber bila YouTube menyediakannya. Terjemahan hanya ditawarkan jika ada track/URL terjemahan dari YouTube. Tools tidak membuat terjemahan sendiri dan tidak mengubah suara menjadi dub baru.
 
-Setiap track disimpan sebagai **SRT terpisah**. Untuk mode yang memiliki video, track juga dimasukkan ke MKV sebagai subtitle yang bisa dinyalakan/dimatikan. Untuk audio saja, SRT tetap terpisah. Tidak ada burn-in.
+Setiap track disimpan sebagai **SRT terpisah**. Untuk mode yang memiliki video, track juga dimasukkan ke MKV sebagai subtitle yang bisa dinyalakan/dimatikan; pada MP4 kompatibel track tidak ditanam dan hanya SRT terpisah yang ada. Untuk audio saja, SRT tetap terpisah. Tidak ada burn-in.
 
 Subtitle gagal tidak membuang media yang sudah selesai: hasil ditandai partial. Resume mengambil kembali subtitle yang hilang dan memperbarui track dalam hasil akhir, menggunakan media yang sudah ada. Nama track membedakan CC dan caption otomatis. Pada playlist dengan banyak sumber, sumber dipilih per item dan terlihat pada ringkasan.
 

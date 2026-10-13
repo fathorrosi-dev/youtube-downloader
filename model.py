@@ -41,8 +41,49 @@ def default_language(info):
     return preferred.get("language") or "und"
 
 
-def qualities(info):
-    return sorted({resolution(f) for f in info.get("formats", []) if has_video(f)}, reverse=True)
+def compatible_video_rank(f):
+    """0 for H.264, 1 for AV1, None for anything else.
+
+    These are the video codecs the "MP4 kompatibel" option accepts. H.264 comes first because
+    every phone, Mac, Windows PC and video editor decodes it. YouTube serves nothing above 1080p
+    in H.264, so AV1 is the only way to reach 1440p and 2160p inside an MP4."""
+    codec = (f.get("vcodec") or "").lower()
+    if codec.startswith(("avc", "h264")):
+        return 0
+    if codec.startswith(("av01", "av1")):
+        return 1
+    return None
+
+
+def compatible_audio(f):
+    return (f.get("acodec") or "").lower().startswith(("mp4a", "aac"))
+
+
+def codec_name(codec):
+    """A short readable name for a yt-dlp codec string, e.g. avc1.640028 -> H.264."""
+    codec = (codec or "").lower()
+    for prefixes, name in (
+        (("avc", "h264"), "H.264"),
+        (("av01", "av1"), "AV1"),
+        (("vp09", "vp9"), "VP9"),
+        (("hev", "hvc", "h265"), "H.265"),
+        (("mp4a", "aac"), "AAC"),
+        (("opus",), "Opus"),
+    ):
+        if codec.startswith(prefixes):
+            return name
+    return codec.split(".")[0].upper() or "?"
+
+
+def qualities(info, compatible=False):
+    return sorted(
+        {
+            resolution(f)
+            for f in info.get("formats", [])
+            if has_video(f) and (not compatible or compatible_video_rank(f) is not None)
+        },
+        reverse=True,
+    )
 
 
 def pick(
@@ -53,6 +94,7 @@ def pick(
     audio_format="original",
     video_id=None,
     audio_id=None,
+    compatible=False,
 ):
     fs = [f for f in info.get("formats", []) if f.get("format_id") and not f.get("has_drm")]
     language = language or default_language(info)
@@ -60,19 +102,31 @@ def pick(
     a = None
     if mode not in MODES:
         raise SelectionError("Mode tidak valid")
+    # "MP4 kompatibel" only concerns the video file, and only when the user did not pick the
+    # streams by hand: a hand-picked stream is used as chosen.
+    compatible = bool(compatible) and mode != "audio"
     if mode != "audio":
         vs = [f for f in fs if has_video(f)]
         if video_id:
             vs = [f for f in vs if f["format_id"] == video_id]
-        elif quality != "best":
-            # An exact tier wins; playlist fallback uses only lower tiers.
-            exact = [f for f in vs if resolution(f) == int(quality)]
-            vs = exact or [f for f in vs if resolution(f) < int(quality)]
+        else:
+            if compatible:
+                vs = [f for f in vs if compatible_video_rank(f) is not None]
+                if not vs:
+                    raise SelectionError("Tidak ada video H.264/AV1 untuk MP4 kompatibel")
+            if quality != "best":
+                # An exact tier wins; playlist fallback uses only lower tiers.
+                exact = [f for f in vs if resolution(f) == int(quality)]
+                vs = exact or [f for f in vs if resolution(f) < int(quality)]
         if not vs:
             raise SelectionError("Tidak ada video pada atau di bawah target kualitas")
         tier = max(resolution(f) for f in vs)
+        at_tier = [f for f in vs if resolution(f) == tier]
+        if compatible and not video_id:
+            best = min(compatible_video_rank(f) for f in at_tier)
+            at_tier = [f for f in at_tier if compatible_video_rank(f) == best]
         # Metadata formats retain yt-dlp's native worst-to-best ordering.
-        v = [f for f in vs if resolution(f) == tier][-1]
+        v = at_tier[-1]
     if mode != "video":
         af = [f for f in fs if has_audio(f) and (f.get("language") or "und") == language]
         if audio_id:
@@ -80,11 +134,15 @@ def pick(
         if not af:
             raise SelectionError("Track audio yang dipilih tidak tersedia")
         only = [f for f in af if not has_video(f)]
-        a = (only or af)[-1]
+        pool = only or af
+        if compatible and not audio_id:
+            # Without AAC in this language the best stream is kept and the file becomes MKV.
+            pool = [f for f in pool if compatible_audio(f)] or pool
+        a = pool[-1]
     streams = {f["format_id"]: f for f in (v, a) if f}
     sizes = [f.get("filesize") or f.get("filesize_approx") for f in streams.values()]
     estimate = sum(sizes) if sizes and all(sizes) else 0
-    return {
+    choice = {
         "mode": mode,
         "quality": quality,
         "actual_quality": resolution(v) if v else None,
@@ -100,6 +158,10 @@ def pick(
         "acodec": a.get("acodec") if a else None,
         "estimated_size": estimate,
     }
+    if compatible:
+        # Stored only when asked for, so the identity of every other download is unchanged.
+        choice["compatible"] = True
+    return choice
 
 
 def tracks(info):
@@ -147,15 +209,19 @@ def container(choice, subtitles):
             if codec.startswith("mp3")
             else "mka"
         )
+    plays_in_mp4 = (choice.get("vcodec") or "").startswith(
+        ("avc", "h264", "hevc", "h265", "hev", "hvc", "av01", "av1", "mpeg4")
+    ) and (
+        choice["mode"] == "video"
+        or (choice.get("acodec") or "").startswith(("mp4a", "aac", "alac"))
+    )
+    if choice.get("compatible") and plays_in_mp4:
+        # MP4 cannot carry subtitles that a player can switch off, so with this option they stay
+        # next to the video as .srt files.
+        return "mp4"
     if subtitles:
         return "mkv"
-    compatible_video = (choice.get("vcodec") or "").startswith(
-        ("avc", "h264", "hevc", "h265", "hev", "hvc", "av01", "av1", "mpeg4")
-    )
-    compatible_audio = choice["mode"] == "video" or (choice.get("acodec") or "").startswith(
-        ("mp4a", "aac", "alac")
-    )
-    return "mp4" if compatible_video and compatible_audio else "mkv"
+    return "mp4" if plays_in_mp4 else "mkv"
 
 
 def variant(item):

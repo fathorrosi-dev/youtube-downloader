@@ -1,6 +1,6 @@
 # YouTube Downloader 1.2.0
 
-CLI Python untuk video YouTube, Shorts, dan playlist: pilihan resolusi asli + audio terbaik, audio saja, video saja, subtitle dan terjemahan yang tersedia. Video + audio digabung menjadi satu file tanpa re-encode; MP3 merupakan opsi konversi terpisah.
+CLI Python untuk video YouTube, Shorts, dan playlist: pilihan resolusi asli + audio terbaik, audio saja, video saja, subtitle dan terjemahan yang tersedia. Video + audio digabung menjadi satu file tanpa re-encode (MKV atau MP4; pilihan **MP4 kompatibel** memakai H.264/AV1 + AAC untuk iPhone, Mac, dan editor video); MP3 merupakan opsi konversi terpisah.
 
 - Ubuntu 24.04+ x64, Windows 11 x64 native, macOS 15+ Intel/Apple Silicon.
 - Python standar 3.10–3.14; 3.13 direkomendasikan.

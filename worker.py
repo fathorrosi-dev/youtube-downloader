@@ -11,6 +11,7 @@ from compat import deno_path, worker_start
 from pathlib import Path
 import yt_dlp
 from yt_dlp.networking import Request
+from yt_dlp.utils import ISO639Utils
 from model import container, basename, variant, classify
 from store import BASE, probe
 
@@ -265,6 +266,19 @@ def subtitle_files(info, item, root, events, opts):
     return saved, missing
 
 
+def audio_language(code, extension):
+    """The language tag to write on the audio track, or None to write none.
+
+    Matroska accepts YouTube's two-letter codes (en, id, en-US). The MP4 muxer silently drops
+    anything that is not a three-letter ISO 639-2 code, so those are converted for MP4."""
+    if extension != "mp4":
+        return code
+    short = code.split("-")[0].lower()
+    if len(short) == 3:
+        return short
+    return ISO639Utils.short2long(short)
+
+
 def download(request, events):
     item = request["item"]
     choice = item["choice"]
@@ -351,7 +365,8 @@ def download(request, events):
             if choice["audio_format"] == "mp3"
             else ["-c:a", "copy"]
         )
-    if subtitles and mode != "audio":
+    if subtitles and mode != "audio" and extension == "mkv":
+        # Only Matroska takes the SRT tracks; an MP4 keeps them as the separate .srt files.
         # ffmpeg input options must precede mapping/output options.
         base_inputs = ["-i", paths["video"]]
         if mode == "video-audio":
@@ -373,7 +388,12 @@ def download(request, events):
             ]
         args += ["-c:s", "srt"]
     if mode != "video" and choice.get("language") != "und":
-        args += ["-metadata:s:a:0", "language=" + choice["language"]]
+        language = audio_language(choice["language"], extension)
+        if language:
+            args += ["-metadata:s:a:0", "language=" + language]
+    if extension == "mp4":
+        # Moves the index to the front so QuickTime, iOS and browsers can start playing at once.
+        args += ["-movflags", "+faststart"]
     try:
         ffmpeg(
             [*args, str(temp)],

@@ -23,6 +23,9 @@ from model import (
     container,
     variant,
     item_indices,
+    codec_name,
+    compatible_audio,
+    compatible_video_rank,
     has_video,
     has_audio,
     resolution,
@@ -50,7 +53,7 @@ def settings_plan(mode, has_subtitles):
     """The numbered prompts that follow the choice of mode, in the order they are asked."""
     plan = []
     if mode != "audio":
-        plan.append("quality")
+        plan += ["container", "quality"]
     if mode != "video":
         plan.append("language")
     if mode == "audio":
@@ -192,10 +195,28 @@ def wizard(ui, url, browser=None, output=None):
     quality = "best"
     manual = False
     audio_format = "original"
+    compatible = False
     if mode != "audio":
-        tiers = sorted({q for m in metadata for q in qualities(m)}, reverse=True)
+        sound = " + AAC" if mode == "video-audio" else ""
+        compatible = ui.choose(
+            "Format file",
+            [
+                ("Otomatis · MKV atau MP4 sesuai codec · Direkomendasikan", False),
+                (f"MP4 kompatibel · H.264/AV1{sound} · iPhone, Mac, editor", True),
+            ],
+            step=steps.next(),
+            label="Format file",
+        )
+        tiers = sorted(
+            {q for m in metadata for q in qualities(m, compatible)},
+            reverse=True,
+        )
         if not tiers:
-            raise ValueError("Tidak ada format video yang tersedia")
+            raise ValueError(
+                "Tidak ada video H.264/AV1 untuk MP4 kompatibel; pilih format file Otomatis"
+                if compatible
+                else "Tidak ada format video yang tersedia"
+            )
         recommended = (
             1080 if 1080 in tiers else max((q for q in tiers if q <= 1080), default=min(tiers))
         )
@@ -254,6 +275,13 @@ def wizard(ui, url, browser=None, output=None):
             }
             if mode == "audio":
                 ui.say(Text("Audio saja: subtitle disimpan sebagai file .srt.", style=DIM))
+            elif compatible:
+                ui.say(
+                    Text(
+                        "MP4 kompatibel: subtitle disimpan sebagai file .srt di folder subtitle.",
+                        style=DIM,
+                    )
+                )
             chosen = ui.checkboxes(
                 "Track subtitle",
                 [
@@ -273,19 +301,26 @@ def wizard(ui, url, browser=None, output=None):
         ui.say(Text("YouTube tidak mengembalikan subtitle untuk pilihan ini.", style=DIM))
     items = []
     rows = []
+    not_mp4 = 0
     for m in metadata:
         language = default_language(m) if lang == "original" else lang
         video_id = None
         audio_id = None
         if manual:
             if mode != "audio":
+                video_formats = [
+                    f
+                    for f in reversed(m["formats"])
+                    if has_video(f)
+                    and not f.get("has_drm")
+                    and (not compatible or compatible_video_rank(f) is not None)
+                ]
+                if not video_formats:
+                    rows.append((m["title"], "DILEWATI", "Tidak ada video H.264/AV1"))
+                    continue
                 video_id = ui.choose(
                     "Format video · " + m["title"],
-                    [
-                        (format_label(f), f["format_id"])
-                        for f in reversed(m["formats"])
-                        if has_video(f) and not f.get("has_drm")
-                    ],
+                    [(format_label(f), f["format_id"]) for f in video_formats],
                     label="Format video",
                 )
             if mode != "video":
@@ -294,6 +329,9 @@ def wizard(ui, url, browser=None, output=None):
                     for f in reversed(m["formats"])
                     if has_audio(f) and (f.get("language") or "und") == language
                 ]
+                if compatible:
+                    # Offer AAC first-class: it is what lets the file be an MP4.
+                    af = [f for f in af if compatible_audio(f)] or af
                 if af:
                     audio_id = ui.choose(
                         "Format audio · " + m["title"],
@@ -301,7 +339,7 @@ def wizard(ui, url, browser=None, output=None):
                         label="Format audio",
                     )
         try:
-            choice = pick(m, mode, quality, language, audio_format, video_id, audio_id)
+            choice = pick(m, mode, quality, language, audio_format, video_id, audio_id, compatible)
         except SelectionError as exc:
             rows.append((m["title"], "DILEWATI", str(exc)))
             continue
@@ -337,8 +375,17 @@ def wizard(ui, url, browser=None, output=None):
         )
         if quality != "best" and choice["actual_quality"] and choice["actual_quality"] != quality:
             actual += f" · turun dari {quality}p"
+        extension = container(choice, selected_tracks)
+        if compatible and extension != "mp4":
+            not_mp4 += 1
+        codecs = ""
+        if mode != "audio":
+            codecs = codec_name(choice["vcodec"])
+            if mode == "video-audio":
+                codecs += " + " + codec_name(choice["acodec"])
+            codecs += " · "
         details = (
-            f"{container(choice, selected_tracks).upper()} · audio {language if mode != 'video' else 'tanpa suara'} · "
+            f"{extension.upper()} · {codecs}audio {language if mode != 'video' else 'tanpa suara'} · "
             + (
                 "≈ " + size(choice["estimated_size"])
                 if choice["estimated_size"]
@@ -347,6 +394,8 @@ def wizard(ui, url, browser=None, output=None):
         )
         if selected_tracks:
             details += " · subtitle " + ", ".join(t["name"] for t in selected_tracks)
+            if extension == "mp4":
+                details += " (.srt terpisah)"
         rows.append((m["title"], actual, details))
     if not items:
         raise ValueError("Tidak ada item yang memenuhi pilihan")
@@ -357,6 +406,14 @@ def wizard(ui, url, browser=None, output=None):
     else:
         ui.table(("Video", "Kualitas", "Berkas"), rows)
         ui.say(Text.assemble(("Simpan di ", DIM), tidy(root)))
+    if not_mp4:
+        ui.say(
+            Text(
+                f"{not_mp4} item tidak punya pasangan video/audio yang cocok untuk MP4 · "
+                "disimpan sebagai MKV",
+                style=DIM,
+            )
+        )
     ui.say("")
     if (
         ui.choose(

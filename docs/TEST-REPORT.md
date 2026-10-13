@@ -52,6 +52,8 @@ Belum diverifikasi oleh 12 job native CI; hasil di bawah hanya dari Ubuntu 24.04
 
 - Seluruh kode diformat ulang dengan ruff (perilaku tidak berubah), CI memperoleh job lint, dan `release` kini menunggu `lint` serta `native`.
 - Tampilan CLI baru (simbol, step counter, riwayat jawaban, kartu hasil), rotasi log, batas event worker 8 MiB, `packaging` menggantikan `pip._vendor`, `requirements.lock` ber-hash dengan `pip install --require-hashes`, dan dokumen status dipindah ke `docs/`.
-- 70 tes lulus (1 dilewati tanpa `YT_TEST_INSTALL=1`). Tes pemasangan bersih dijalankan terpisah dengan `YT_TEST_INSTALL=1`: setup, check, preview, migrasi, update, dan rollback lulus memakai lock ber-hash.
+- Pilihan **Format file** di wizard (Otomatis atau MP4 kompatibel: H.264/AV1 + AAC tanpa re-encode, subtitle tetap `.srt` terpisah), ringkasan yang menampilkan codec, `faststart` dan label bahasa audio tiga huruf untuk semua MP4. Perilaku dan identitas unduhan mode Otomatis tidak berubah. Dicoba dengan FFmpeg asli (H.264 + AAC dari fixture); videonya bukan unduhan YouTube nyata.
+- Tes pembersihan folder sementara di Windows kini mencoba ulang (`tests/fsutil.py`) dan `test_maximum_event_size` menulis `MAX_EVENT + 1` byte, setelah job Windows Python 3.13 gagal dengan `WinError 32`.
+- 83 tes lulus (1 dilewati tanpa `YT_TEST_INSTALL=1`; 70 sebelum dua perubahan di atas). Tes pemasangan bersih dijalankan terpisah dengan `YT_TEST_INSTALL=1`: setup, check, preview, migrasi, update, dan rollback lulus memakai lock ber-hash.
 - Tampilan wizard diperiksa pada terminal sungguhan (PTY dengan emulator layar) untuk video tunggal, playlist dengan satu item gagal, mode audio, `NO_COLOR` pada lebar 40, `--plain`, serta lebar 60 dan 100 kolom, dengan downloader tiruan. Pengunduhan YouTube nyata tidak dijalankan ulang.
 - Belum diperiksa: Windows ConPTY dan macOS untuk tampilan baru, serta attestation rilis (lihat catatan di panduan pengembang).
