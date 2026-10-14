@@ -52,6 +52,38 @@ def runtime_asset(runtime):
     return assets.get(key) or (assets.get(platform.machine()) if key.startswith("linux-") else None)
 
 
+def fetch(url, archive):
+    """Download `url` into `archive`, continuing a partial file after a dropped connection.
+
+    urllib does not report a body that ends before its Content-Length: the copy simply stops and
+    looks like a finished download. The length is therefore checked here, so that a cut-off body
+    takes the same path as a failed connection and is resumed instead of failing the checksum."""
+    for attempt in range(3):
+        offset = archive.stat().st_size if archive.exists() else 0
+        try:
+            req = urllib.request.Request(
+                url, headers={"Range": f"bytes={offset}-"} if offset else {}
+            )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                append = offset and response.status == 206
+                if append and not response.headers.get("Content-Range", "").startswith(
+                    f"bytes {offset}-"
+                ):
+                    raise ValueError("Rentang runtime tidak sesuai")
+                announced = response.headers.get("Content-Length", "")
+                with archive.open("ab" if append else "wb") as output:
+                    shutil.copyfileobj(response, output, length=262144)
+            received = archive.stat().st_size - (offset if append else 0)
+            if announced.isdigit() and received != int(announced):
+                raise ValueError("Unduhan runtime terpotong")
+            return
+        except Exception:
+            if attempt == 2:
+                raise
+            print("Koneksi runtime terputus · mencoba melanjutkan", flush=True)
+            time.sleep(attempt + 1)
+
+
 def download_runtime(root):
     runtime = json.loads((root / "runtime.json").read_text(encoding="utf-8"))
     version = runtime["deno_version"]
@@ -102,35 +134,22 @@ def download_runtime(root):
     binary.parent.mkdir(parents=True, exist_ok=True)
     archive = root / ".runtime" / ("deno-" + version + "-" + platform_key() + ".tgz.part")
     print("Menyiapkan Deno lokal " + version + " · distribusi resmi npm", flush=True)
-    for attempt in range(3):
-        offset = archive.stat().st_size if archive.exists() else 0
-        try:
-            req = urllib.request.Request(
-                url, headers={"Range": f"bytes={offset}-"} if offset else {}
+    for attempt in range(2):
+        fetch(url, archive)
+        with archive.open("rb") as stream:
+            digest = (
+                hashlib.file_digest(stream, "sha512").digest()
+                if hasattr(hashlib, "file_digest")
+                else hashlib.sha512(stream.read()).digest()
             )
-            with urllib.request.urlopen(req, timeout=30) as response:
-                append = offset and response.status == 206
-                if append and not response.headers.get("Content-Range", "").startswith(
-                    f"bytes {offset}-"
-                ):
-                    raise ValueError("Rentang runtime tidak sesuai")
-                with archive.open("ab" if append else "wb") as output:
-                    shutil.copyfileobj(response, output, length=262144)
+        if digest == expected:
             break
-        except Exception:
-            if attempt == 2:
-                raise
-            print("Koneksi runtime terputus · mencoba melanjutkan", flush=True)
-            time.sleep(attempt + 1)
-    with archive.open("rb") as stream:
-        digest = (
-            hashlib.file_digest(stream, "sha512").digest()
-            if hasattr(hashlib, "file_digest")
-            else hashlib.sha512(stream.read()).digest()
-        )
-    if digest != expected:
+        # Whatever is on disk is never trusted twice: a damaged partial file or a download that
+        # was cut off must not decide the outcome, so the file is fetched again from the start.
         archive.unlink(missing_ok=True)
-        raise ValueError("Checksum Deno tidak cocok; arsip ditolak")
+        if attempt:
+            raise ValueError("Checksum Deno tidak cocok; arsip ditolak")
+        print("Checksum Deno tidak cocok · mengunduh ulang dari awal", flush=True)
     with tempfile.TemporaryDirectory(dir=root / ".runtime") as folder:
         new = Path(folder) / binary.name
         with tarfile.open(archive) as source:

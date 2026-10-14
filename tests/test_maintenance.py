@@ -1,16 +1,23 @@
 """Release lifecycle and wizard contracts, without YouTube access."""
 
+import base64
 import copy
+import hashlib
 import io
 import json
 import re
 import sys
+import tarfile
 import tempfile
+import threading
 import time
 import unittest
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
@@ -479,8 +486,12 @@ class RuntimeIntegrity(unittest.TestCase):
                 json.dumps({"deno_version": "2.9.6", "assets": {platform_key(): asset}})
             )
             with (
+                # A bad download is fetched once more before it is given up, so every call
+                # needs a fresh response.
                 patch.object(
-                    maintenance.urllib.request, "urlopen", return_value=Response(b"corrupt data")
+                    maintenance.urllib.request,
+                    "urlopen",
+                    side_effect=lambda *args, **kwargs: Response(b"corrupt data"),
                 ),
                 patch.object(maintenance.subprocess, "run") as process,
             ):
@@ -499,6 +510,129 @@ class RuntimeIntegrity(unittest.TestCase):
         self.assertEqual(s.downloaded, s.byte_total)
         self.assertIsNone(s.eta)
         self.assertEqual(s.file.tasks[0].completed, s.file.tasks[0].total)
+
+
+class RuntimeDownload(unittest.TestCase):
+    """download_runtime against a local server that stands in for registry.npmjs.org."""
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+            program = b"not a real deno " + bytes(range(256)) * 2000
+            member = tarfile.TarInfo("package/deno")
+            member.size = len(program)
+            tar.addfile(member, io.BytesIO(program))
+        self.data = archive.getvalue()
+        self.wrong = bytes(reversed(self.data))
+        self.plan = []  # one entry per request: "ok", "cut" (connection drops) or "wrong"
+        self.ranges = []
+        asset = {
+            "url": "https://registry.npmjs.org/@deno/example/-/deno.tgz",
+            "integrity": "sha512-" + base64.b64encode(hashlib.sha512(self.data).digest()).decode(),
+            "member": "package/deno",
+        }
+        (self.root / "runtime.json").write_text(
+            json.dumps({"deno_version": "2.9.6", "assets": {platform_key(): asset}})
+        )
+        (self.root / ".runtime").mkdir()
+        self.part = self.root / ".runtime" / ("deno-2.9.6-" + platform_key() + ".tgz.part")
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(handler):
+                self.ranges.append(handler.headers.get("Range"))
+                action = self.plan.pop(0) if self.plan else "ok"
+                data = self.wrong if action == "wrong" else self.data
+                start = 0
+                requested = handler.headers.get("Range")
+                if requested:
+                    start = int(requested.split("=")[1].split("-")[0])
+                    handler.send_response(206)
+                    handler.send_header(
+                        "Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}"
+                    )
+                else:
+                    handler.send_response(200)
+                body = data[start:]
+                handler.send_header("Content-Length", str(len(body)))
+                handler.end_headers()
+                handler.wfile.write(body[: len(body) * 2 // 5] if action == "cut" else body)
+                handler.close_connection = True
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.local = f"http://127.0.0.1:{server.server_port}/deno.tgz"
+
+    def run_download(self):
+        real = urllib.request.urlopen
+
+        def local(request, *args, **kwargs):
+            return real(
+                urllib.request.Request(self.local, headers=dict(request.header_items())),
+                *args,
+                **kwargs,
+            )
+
+        output = io.StringIO()
+        version = SimpleNamespace(returncode=0, stdout="deno 2.9.6 (stable)\n")
+        with (
+            patch.object(maintenance.urllib.request, "urlopen", local),
+            patch.object(maintenance.time, "sleep"),
+            patch.object(maintenance.subprocess, "run", return_value=version) as process,
+            redirect_stdout(output),
+        ):
+            try:
+                maintenance.download_runtime(self.root)
+            finally:
+                self.version_checks = process.call_count
+        return output.getvalue()
+
+    def test_a_connection_cut_mid_file_is_resumed_in_the_same_run(self):
+        # urllib does not notice a body shorter than its Content-Length; without the length
+        # check this ended in "Checksum Deno tidak cocok" and the user had to run setup again.
+        self.plan = ["cut"]
+        output = self.run_download()
+        self.assertIn("Koneksi runtime terputus", output)
+        self.assertEqual(self.ranges[0], None)
+        offset = int(self.ranges[1].split("=")[1].rstrip("-"))
+        self.assertTrue(0 < offset < len(self.data), self.ranges)
+        self.assertTrue((self.root / ".runtime/installed.json").is_file())
+        self.assertTrue(deno_path(self.root).is_file())
+        self.assertFalse(self.part.exists())
+
+    def test_a_damaged_partial_file_is_dropped_and_fetched_again_from_the_start(self):
+        self.part.write_bytes(b"\0" * 1000)
+        output = self.run_download()
+        self.assertIn("mengunduh ulang dari awal", output)
+        self.assertEqual(self.ranges, ["bytes=1000-", None])
+        self.assertTrue(deno_path(self.root).is_file())
+        self.assertFalse(self.part.exists())
+
+    def test_a_download_that_stays_wrong_is_still_rejected(self):
+        self.plan = ["wrong", "wrong", "wrong"]
+        with self.assertRaisesRegex(ValueError, "Checksum Deno tidak cocok"):
+            self.run_download()
+        self.assertEqual(self.ranges, [None, None])  # one more try, from the start, then stop
+        self.assertEqual(self.version_checks, 0)  # nothing from the bad archive was run
+        self.assertFalse(self.part.exists())
+        self.assertFalse(deno_path(self.root).exists())
+
+    def test_a_good_download_is_one_request(self):
+        output = self.run_download()
+        self.assertEqual(self.ranges, [None])
+        self.assertNotIn("terputus", output)
+        self.assertTrue((self.root / ".runtime/installed.json").is_file())
 
 
 if __name__ == "__main__":
