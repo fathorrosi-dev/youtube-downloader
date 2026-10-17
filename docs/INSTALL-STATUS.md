@@ -1,5 +1,7 @@
 # Pemasangan YouTube Downloader 1.2.0
 
+> Catatan pemasangan ini merekam rilis 1.2.0. Sumber saat ini 1.3.0 dan belum dirilis; hasil verifikasinya ada di bagian "Perubahan setelah 1.2.0" pada [TEST-REPORT.md](TEST-REPORT.md).
+
 Selesai, 7 Oktober 2026. Home `~/tools/youtube-downloader` sudah 1.2.0. Paket diunduh dari aset repo GitHub privat, checksum dan metadata diperiksa, lalu dipasang memakai installer terisolasi dan kunci alat. Cadangan 1.1.0: `.state/program-backups/1791378947876993719`; journal `.state/last-update.json` menunjuk cadangan tersebut.
 
 - Seluruh 12 job CI native lulus; 52 tes termasuk regresi dan 15 tes self-update. Detail dan batas verifikasi ada di TEST-REPORT.md.

@@ -1,7 +1,9 @@
 """yt-dlp public hooks and FFmpeg stream-copy finalization in an isolated process."""
 
+import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -193,15 +195,19 @@ def ffmpeg(args, events, stage, phase="finish"):
     )
 
 
+def subtitle_path(root, prefix, track):
+    suffix = track["origin"] + "-" + track["key"]
+    suffix = "".join(c if c.isalnum() or c in "-_" else "_" for c in suffix)
+    return root / "subtitle" / f"{prefix}.{suffix}.srt"
+
+
 def subtitle_files(info, item, root, events, opts):
     saved = []
     missing = []
     prefix = basename(item)
     with yt_dlp.YoutubeDL(opts) as ydl:
         for track in item.get("subtitles", []):
-            suffix = track["origin"] + "-" + track["key"]
-            suffix = "".join(c if c.isalnum() or c in "-_" else "_" for c in suffix)
-            target = root / "subtitle" / f"{prefix}.{suffix}.srt"
+            target = subtitle_path(root, prefix, track)
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.is_file() and target.stat().st_size:
                 saved.append({**track, "path": str(target)})
@@ -282,6 +288,57 @@ def audio_language(code, extension):
     return ISO639Utils.short2long(short)
 
 
+def adopt_result(item, root, target, mode, events):
+    """A finished file that has no archive record, found where this download's file belongs.
+
+    That happens when the tool stopped between moving the file into place and recording it. The
+    file name carries the hash of the variant, so it is the same download: if it passes the same
+    check as a fresh result it is adopted as it is. No network and no FFmpeg, so nothing is
+    rewritten. A file that does not pass is never touched; the caller refuses to overwrite it."""
+    try:
+        probe(target, mode)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return None
+    events.send("stage", message="Hasil sebelumnya ditemukan; dicatat ke arsip", phase="finish")
+    prefix = basename(item)
+    saved, missing = [], []
+    for track in item.get("subtitles", []):
+        path = subtitle_path(root, prefix, track)
+        if path.is_file() and path.stat().st_size:
+            saved.append({**track, "path": str(path)})
+        else:
+            missing.append(track)
+    return {"path": str(target), "mode": mode, "subtitles": saved, "missing": missing}
+
+
+# What a first extraction leaves in the info once it has chosen formats. The next pass chooses
+# for itself, and these leftovers would be joined into its download URL.
+SELECTION_KEYS = ("requested_formats", "requested_downloads", "requested_subtitles")
+# HTTP statuses that mean a signed link is no longer good.
+STALE_LINK = re.compile(r"\b(403|404|410)\b")
+
+
+def download_stream(opts, info, url):
+    """One stream into the temporary folder, and the path of the file.
+
+    The extraction made a moment ago for the metadata check is reused: its signed links are
+    seconds old, and extracting again costs a full round of requests (and the JavaScript
+    challenge) for every stream. Only if the links turn out to be refused, or yt-dlp cannot use
+    the reused information, is the video extracted once more, as every stream used to be."""
+    reuse = copy.deepcopy(info)
+    for key in SELECTION_KEYS:
+        reuse.pop(key, None)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        try:
+            downloaded = ydl.process_ie_result(reuse, download=True)
+        except (yt_dlp.utils.DownloadError, KeyError, TypeError, AttributeError) as exc:
+            if isinstance(exc, yt_dlp.utils.DownloadError) and not STALE_LINK.search(str(exc)):
+                raise
+            print("Info ekstraksi tidak dapat dipakai ulang:", exc, file=sys.stderr, flush=True)
+            downloaded = ydl.extract_info(url, download=True)
+        return ydl.prepare_filename(downloaded)
+
+
 def download(request, events):
     item = request["item"]
     choice = item["choice"]
@@ -293,10 +350,17 @@ def download(request, events):
     target = root / ("audio" if mode == "audio" else "video") / (prefix + "." + extension)
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_root = BASE / ".state/temporary" / variant(item)
-    temp_root.mkdir(parents=True, exist_ok=True)
     existing = request.get("existing_file")
     if target.exists() and not existing:
-        raise ValueError("Benturan hasil: file sudah ada tanpa catatan arsip; tidak ditimpa")
+        adopted = adopt_result(item, root, target, mode, events)
+        if adopted is None:
+            raise ValueError(
+                "Benturan hasil: file sudah ada tanpa catatan arsip dan tidak lolos "
+                "pemeriksaan; tidak ditimpa"
+            )
+        shutil.rmtree(temp_root, ignore_errors=True)
+        return adopted
+    temp_root.mkdir(parents=True, exist_ok=True)
     events.send("stage", message="Memeriksa format dan akses terbaru", phase="metadata")
     metadata_opts = {**opts, "skip_download": True}
     with yt_dlp.YoutubeDL(metadata_opts) as ydl:
@@ -335,9 +399,7 @@ def download(request, events):
                 "writeautomaticsub": False,
                 "writesubtitles": False,
             }
-            with yt_dlp.YoutubeDL(local) as ydl:
-                downloaded = ydl.extract_info(item["url"], download=True)
-                filepath = ydl.prepare_filename(downloaded)
+            filepath = download_stream(local, info, item["url"])
             if not Path(filepath).is_file():
                 raise ValueError("File sementara tidak ditemukan setelah download")
             paths[stream] = filepath

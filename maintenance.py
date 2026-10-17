@@ -12,16 +12,20 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import tarfile
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from compat import (
+    clean_environment,
     file_lock,
     python_path,
     deno_path,
     platform_key,
     environment_identity,
+    folder_size,
     lock_requirements,
     rotate_log,
 )
@@ -33,15 +37,45 @@ def guard(root, wait=False):
     return file_lock(Path(root) / ".state/run.lock", wait)
 
 
-def run_logged(root, args):
+@contextmanager
+def working(message):
+    """A one-line spinner with the elapsed seconds while a long step runs, so a step that takes
+    a minute does not look like a hang. Silent when stderr is not a terminal."""
+    if not sys.stderr.isatty() or os.environ.get("TERM") == "dumb":
+        yield
+        return
+    stop = threading.Event()
+    width = len(message) + 12
+
+    def spin():
+        started, turn = time.monotonic(), 0
+        while not stop.wait(0.15):
+            frame = "|/-\\"[turn % 4]
+            turn += 1
+            sys.stderr.write(f"\r{frame} {message} · {int(time.monotonic() - started)}d")
+            sys.stderr.flush()
+
+    thread = threading.Thread(target=spin, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+        sys.stderr.write("\r" + " " * width + "\r")
+        sys.stderr.flush()
+
+
+def run_logged(root, args, message=None):
     rotate_log(root / ".state/setup.log")
     with (root / ".state/setup.log").open("a", encoding="utf-8") as log:
-        result = subprocess.run(
-            args,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env={**os.environ, "PIP_CACHE_DIR": str(root / ".state/pip-cache")},
-        )
+        with working(message) if message else nullcontext():
+            result = subprocess.run(
+                args,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=clean_environment({"PIP_CACHE_DIR": str(root / ".state/pip-cache")}),
+            )
     if result.returncode:
         raise ValueError("Pemeliharaan gagal. Periksa " + str(root / ".state/setup.log"))
 
@@ -253,6 +287,7 @@ def setup(root, check=False, upgrade=False):
                 "-r",
                 str(root / "requirements.lock"),
             ],
+            "Memasang dependensi",
         )
     run_logged(root, [str(py), "-m", "pip", "check"])
     if check:
@@ -405,6 +440,112 @@ def rollback(root):
     record["rolled_back_at"] = time.time()
     journal.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print("Program dan dependensi rilis dipulihkan. Media dan job dipertahankan.")
+
+
+# What `clean` is allowed to remove. Never in this list, so never touched: jobs, the archive,
+# settings, the lock, the update journal, the logs, and of course the media.
+CLEAN_CATEGORIES = {
+    "venv": "Lingkungan Python lama (setelah pindah folder)",
+    "backups": "Cadangan program lama (yang terbaru dan target rollback disimpan)",
+    "temporary": "Folder sementara milik job yang sudah selesai",
+    "media": "Cadangan jalur media yang sudah lama",
+    "cache": "Cache pip dan yt-dlp (dibuat ulang otomatis)",
+    "leftovers": "Sisa proses yang terhenti",
+}
+CLEAN_DAYS = 30
+
+
+def completed_variants(state):
+    """Variants of every item of a finished job: their temporary folders are no longer needed."""
+    from model import variant  # only `clean` needs it; setup and update must not depend on it
+
+    done = set()
+    for path in (state / "jobs").glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+            if job.get("status") != "complete":
+                continue
+            done.update(variant(item) for item in job["items"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return done
+
+
+def clean_plan(root, days=CLEAN_DAYS, now=None):
+    """{category: [(path, bytes)]} of what `clean` may remove. Nothing is touched here."""
+    state = Path(root) / ".state"
+    now = time.time() if now is None else now
+    plan = {name: [] for name in CLEAN_CATEGORIES}
+
+    def add(category, path):
+        try:
+            if not path.is_symlink():
+                plan[category].append(
+                    (path, folder_size(path) if path.is_dir() else path.stat().st_size)
+                )
+        except OSError:
+            pass
+
+    def older_than(path, seconds):
+        try:
+            return now - path.stat().st_mtime > seconds
+        except OSError:
+            return False
+
+    for path in state.glob("venv-before-move-*"):
+        add("venv", path)
+    backups = sorted(
+        (p for p in (state / "program-backups").glob("*") if p.is_dir()),
+        key=lambda p: int(p.name) if p.name.isdigit() else 0,
+    )
+    keep = {backups[-1].resolve()} if backups else set()
+    try:
+        record = json.loads((state / "last-update.json").read_text(encoding="utf-8"))
+        keep.add(Path(record["backup"]).resolve())
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    for path in backups:
+        if path.resolve() not in keep:
+            add("backups", path)
+    done = completed_variants(state)
+    for path in (state / "temporary").glob("*"):
+        if path.name in done:
+            add("temporary", path)
+    for path in (state / "media-path-backups").glob("*"):
+        if older_than(path, days * 86400):
+            add("media", path)
+    for name in ("pip-cache", "cache"):
+        if (state / name).is_dir():
+            add("cache", state / name)
+    for pattern in ("worker-*.json", "release-*"):
+        for path in state.glob(pattern):
+            if older_than(path, 86400):
+                add("leftovers", path)
+    return plan
+
+
+def clean(root, apply=False, days=CLEAN_DAYS):
+    """Remove (or, by default, only list) what is safe to remove under .state.
+
+    Returns [(label, how many, bytes)] for the categories that have something. Every path is
+    checked to be inside .state and not a link before it is removed."""
+    state = (Path(root) / ".state").resolve()
+    rows = []
+    for category, entries in clean_plan(root, days).items():
+        count = freed = 0
+        for path, weight in entries:
+            if apply:
+                if path.is_symlink() or not path.resolve().is_relative_to(state):
+                    continue
+                try:
+                    shutil.rmtree(path) if path.is_dir() else path.unlink()
+                except OSError:
+                    continue
+            count += 1
+            freed += weight
+        if count:
+            rows.append((CLEAN_CATEGORIES[category], count, freed))
+    return rows
 
 
 def migrate(source, dest):

@@ -9,7 +9,7 @@ import sys
 import threading
 import uuid
 from store import BASE, STATE, write_json
-from compat import ProcessTree, rotate_log
+from compat import ProcessTree, clean_environment, rotate_log
 
 # One NDJSON line. A 5,000-item playlist with escaped non-Latin titles is roughly 4 MiB, so 8 MiB
 # leaves headroom; MAX_EVENT * MAX_QUEUE (128 MiB) bounds what the reader can buffer.
@@ -112,7 +112,7 @@ def run(request, on_event=None):
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=log,
-                env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+                env=clean_environment({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}),
                 **flags,
             )
             tree = ProcessTree(process)

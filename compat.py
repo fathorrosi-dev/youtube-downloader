@@ -13,6 +13,31 @@ import sys
 import time
 
 
+# Credentials of this tool's own updater. The processes it starts (yt-dlp, FFmpeg, pip) never need
+# them, so they do not inherit them.
+SECRET_ENVIRONMENT = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+def clean_environment(extra=None, environ=None):
+    """The environment for a child process: ours, without GitHub credentials, plus `extra`."""
+    source = os.environ if environ is None else environ
+    result = {k: v for k, v in source.items() if k.upper() not in SECRET_ENVIRONMENT}
+    result.update(extra or {})
+    return result
+
+
+def folder_size(path):
+    """Bytes in a folder tree. Links are counted as links and never followed."""
+    total = 0
+    for folder, _, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.lstat(os.path.join(folder, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
 def platform_key():
     family = {"Linux": "linux", "Darwin": "darwin", "Windows": "windows"}.get(
         platform.system(), platform.system().lower()

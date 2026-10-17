@@ -8,6 +8,7 @@ import subprocess
 import os
 from datetime import datetime, timezone
 from compat import file_lock, default_media, platform_key
+from model import SelectionError, valid_browser
 
 BASE = Path(__file__).resolve().parent
 STATE = BASE / ".state"
@@ -33,9 +34,29 @@ def lock(wait=False):
     return file_lock(STATE / "run.lock", wait)
 
 
+def read_json(path, what):
+    """A JSON file, or an error that names the file and says what is wrong with it."""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"{what} tidak dapat dibaca: {path} ({exc}). Perbaiki isinya atau pindahkan file itu."
+        ) from exc
+
+
 def settings():
     path = BASE / "settings.json"
-    return {**DEFAULT, **(json.loads(path.read_text(encoding="utf-8")) if path.exists() else {})}
+    stored = read_json(path, "Pengaturan") if path.exists() else {}
+    if not isinstance(stored, dict):
+        raise ValueError(f"Pengaturan tidak valid: {path} harus berupa objek JSON")
+    merged = {**DEFAULT, **stored}
+    if not isinstance(merged["output"], str) or not merged["output"].strip():
+        raise ValueError(f"Pengaturan tidak valid: 'output' di {path} harus berupa jalur folder")
+    try:
+        valid_browser(merged["browser"])
+    except SelectionError as exc:
+        raise ValueError(f"Pengaturan tidak valid di {path}: {exc}") from None
+    return merged
 
 
 def save_job(job):
@@ -63,7 +84,32 @@ def load_job(identifier):
     path = STATE / "jobs" / f"{identifier}.json"
     if not path.exists():
         raise ValueError("Job tidak ditemukan")
-    return json.loads(path.read_text(encoding="utf-8"))
+    job = read_json(path, "Job")
+    if not isinstance(job, dict) or not isinstance(job.get("items", []), list):
+        raise ValueError(f"Job tidak valid: {path} bukan catatan job")
+    return job
+
+
+# Job statuses that still have something to do. Anything else is finished.
+RESUMABLE = ("prepared", "running", "interrupted", "blocked", "partial")
+
+
+def list_jobs():
+    """Every readable job, newest first, and the job files that could not be read.
+
+    A damaged file is reported, never fatal: this is what `status` and `resume` rely on."""
+    jobs, unreadable = [], []
+    for path in (STATE / "jobs").glob("*.json"):
+        try:
+            jobs.append(load_job(path.stem))
+        except ValueError as exc:
+            unreadable.append((path.stem, str(exc)))
+    jobs.sort(key=lambda j: j.get("updated_at") or j.get("created_at") or "", reverse=True)
+    return jobs, unreadable
+
+
+def resumable_jobs(jobs):
+    return [j for j in jobs if j.get("status") in RESUMABLE]
 
 
 def probe(path, mode):

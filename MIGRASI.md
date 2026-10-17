@@ -46,6 +46,8 @@ python maintenance.py rebase-media --from '/home/USER_LAMA/Videos/YouTube' --to 
 .\youtube-downloader.cmd resume ID_JOB --browser firefox
 ```
 
+Setelah `setup`, aksi yang sama tersedia dari launcher dengan flag yang sama, tanpa perlu mengetik `maintenance.py`: `./youtube-downloader rebase-media --from LAMA --to BARU [--dry-run]` (Windows: `.\youtube-downloader.cmd rebase-media ...`). Ia memakai kunci yang sama dengan download. `setup`, `migrate`, dan `rollback` tetap dijalankan lewat `.sh`/`.cmd`-nya, karena ketiganya mengubah lingkungan Python yang sedang dipakai perintah itu sendiri; `./youtube-downloader setup` menjelaskan hal ini dan menunjuk skrip yang benar.
+
 Dry-run menampilkan jalur yang akan berubah, jumlah job/hasil, dan media/SRT yang belum tersedia. Benturan arsip atau nama ditolak tanpa perubahan. Penerapan memerlukan semua media/SRT tercatat yang dipetakan tersedia; bila file memang dihapus, buat job baru untuk pemulihan atau pulihkan file dahulu. Cadangan database/job/settings tersimpan di `.state/media-path-backups/`. Perubahan SQLite dan JSON dipulihkan bila penerapan gagal. Menjalankan ulang pemetaan yang sama tidak mengubah lagi catatan yang telah dipetakan.
 
 Identitas varian dan schema arsip tetap sama; resume melewati hasil valid di lokasi baru. Jika ingin membatalkan pemetaan, hentikan proses lalu salin kembali database, settings, dan job dari cadangan yang tercetak; jangan mencampur cadangan dari tahap yang berbeda. Salinan media tetap di tempatnya.

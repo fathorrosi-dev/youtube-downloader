@@ -3,13 +3,14 @@
 import copy
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from contextlib import ExitStack, redirect_stderr
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -261,6 +262,47 @@ class Selection(unittest.TestCase):
         with self.assertRaises(model.SelectionError):
             model.valid_url("https://evil.example/video")
 
+    def test_an_empty_answer_never_selects_every_item(self):
+        for empty in ("", "   ", None):
+            with self.assertRaisesRegex(model.SelectionError, "all untuk semua"):
+                model.item_indices(empty, 40)
+        # "all" is still there, spelled out, in either language and any case.
+        self.assertEqual(model.item_indices("all", 3), [0, 1, 2])
+        self.assertEqual(model.item_indices(" Semua ", 2), [0, 1])
+
+    def test_classification_reads_phrases_and_statuses_not_loose_substrings(self):
+        for message, kind in (
+            # The format error is its own kind: it is not about the video, so it must count
+            # toward the three-failures stop and never be skipped as "unavailable".
+            ("ERROR: [youtube] abc: Requested format is not available", "format"),
+            ("ERROR: [youtube] abc: This video is not available", "unavailable"),
+            ("Video unavailable. Blocked it on copyright grounds", "unavailable"),
+            ("The uploader has not made this video available in your country", "unavailable"),
+            # "429" inside a video id is not a rate limit; as a status it is.
+            ("ERROR: [youtube] aB429cdEfGh: Something went wrong", "system"),
+            ("HTTP Error 429: Too Many Requests", "rate_limit"),
+            ("Status code: 429", "rate_limit"),
+            ("HTTP Error 503: Service Unavailable", "network"),
+            ("<urlopen error [Errno 111] Connection refused>", "network"),
+            ("unable to download video data: HTTP Error 403: Forbidden", "system"),
+            ("Unexpected API structure", "system"),
+        ):
+            self.assertEqual(model.classify(message), kind, message)
+
+    def test_browser_values_and_release_age(self):
+        for good in (None, "", "firefox", "firefox:/home/me/profile"):
+            self.assertEqual(model.valid_browser(good), good)
+        with self.assertRaises(model.SelectionError):
+            model.valid_browser("chrome")
+        from datetime import date
+
+        today = date(2026, 10, 15)
+        self.assertEqual(model.release_age_days("2026.8.19", today), 57)
+        self.assertEqual(model.release_age_days("2026.10.15", today), 0)
+        self.assertEqual(model.release_age_days("2026.10.20", today), 0)  # never negative
+        for not_a_date in ("1.3.0", "", None, "2026.13.40", "x"):
+            self.assertIsNone(model.release_age_days(not_a_date, today))
+
 
 class Integration(unittest.TestCase):
     @classmethod
@@ -497,13 +539,118 @@ class Integration(unittest.TestCase):
         self.assertEqual(archive.get(key, "video-audio", self.media)["path"], result["path"])
         self.assertEqual(archive.get(key, "video-audio", alternate)["path"], str(second))
         second.unlink()
-        with self.assertRaises(runner.WorkerError):
+        # A valid file at the result path with no record to say so is adopted, not an error:
+        # nothing is downloaded or rewritten, and the same result comes back.
+        adopted, events = self.download(item)
+        self.assertEqual(adopted["path"], result["path"])
+        self.assertFalse(any(e["type"] in ("start", "progress") for e in events))
+        # A file that does not pass the media check is never touched or adopted.
+        original = Path(result["path"]).read_bytes()
+        Path(result["path"]).write_bytes(b"not media")
+        with self.assertRaisesRegex(runner.WorkerError, "Benturan hasil"):
             self.download(item)
+        self.assertEqual(Path(result["path"]).read_bytes(), b"not media")
+        self.assertNotEqual(original, b"not media")
         Path(result["path"]).unlink()
         self.assertIsNone(archive.get(key, "video-audio"))
         result, _ = self.download(item)
         archive.put(key, result)
         self.assertIsNotNone(archive.get(key, "video-audio"))
+
+    def extractions(self):
+        log = self.root / "extractions.log"
+        return log.read_text(encoding="utf-8").split() if log.exists() else []
+
+    def test_one_extraction_serves_every_stream_of_an_item(self):
+        item = self.item()
+        before = len(self.extractions())
+        result, _ = self.download(item)
+        self.assertTrue(Path(result["path"]).is_file())
+        # The metadata check, and nothing more: the video and the audio stream reuse it.
+        self.assertEqual(len(self.extractions()) - before, 1)
+
+    def scripted(self, *flags):
+        """app.main() on the fixture link: the real worker and FFmpeg, no menu and no terminal."""
+        out, err = io.StringIO(), io.StringIO()
+        settings = {"output": str(self.media), "browser": None}
+        with (
+            patch.object(app, "valid_url", side_effect=lambda url: url),
+            patch.object(app, "settings", return_value=settings),
+            patch.object(app.sys.stdin, "isatty", return_value=False, create=True),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
+            code = app.main(["fixture:sample", "--plain", "--yes", *flags])
+        return code, out.getvalue().splitlines(), err.getvalue()
+
+    def test_a_link_with_flags_downloads_with_no_menu_and_prints_the_path(self):
+        code, paths, err = self.scripted("--subs", "en")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(paths), 1)
+        video = Path(paths[0])
+        self.assertEqual(video.suffix, ".mkv")  # embedded subtitles need MKV in Otomatis mode
+        store.probe(video, "video-audio")  # a real, valid file
+        self.assertEqual(len(list((self.media / "subtitle").glob("*.srt"))), 1)
+        self.assertIn("Selesai", err)
+        # The same link again changes nothing and still reports the file, from the archive.
+        code, again, err = self.scripted("--subs", "en")
+        self.assertEqual((code, again), (0, paths), err)
+
+    def test_scripted_audio_as_mp3_and_a_refused_flag(self):
+        code, paths, err = self.scripted("--mode", "audio", "--audio-format", "mp3")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(Path(paths[0]).suffix, ".mp3")
+        code, paths, err = self.scripted("--quality", "9999")
+        self.assertEqual((code, paths), (1, []))
+        self.assertIn("--quality 9999", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_a_finished_file_with_no_record_is_adopted_with_its_subtitles(self):
+        item = self.item(subs=True)
+        result, _ = self.download(item)
+        before = len(self.extractions())
+        again, events = self.download(item)
+        self.assertEqual((again["path"], len(again["subtitles"])), (result["path"], 2))
+        self.assertEqual(again["missing"], [])
+        self.assertEqual(self.announced(events), ["finish"])
+        # No extraction, no stream, no FFmpeg: the file is exactly what it was.
+        self.assertEqual(len(self.extractions()), before)
+        self.assertFalse((self.root / ".state/temporary" / model.variant(item)).exists())
+
+    def test_adopting_a_file_reports_the_subtitles_that_are_gone(self):
+        item = self.item(subs=True)
+        result, _ = self.download(item)
+        Path(result["subtitles"][0]["path"]).unlink()
+        again, _ = self.download(item)
+        self.assertEqual((len(again["subtitles"]), len(again["missing"])), (1, 1))
+
+    def test_a_result_that_cannot_be_recorded_fails_one_item_not_the_batch(self):
+        item = self.item()
+        job = store.new_job(
+            [{**copy.deepcopy(item), "id": "a"}, {**copy.deepcopy(item), "id": "b"}],
+            str(self.media),
+        )
+        results = []
+
+        def fake_run(request, callback=None):
+            path = self.media / "video" / (request["item"]["id"] + ".mp4")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x")
+            results.append(path)
+            return {"path": str(path), "mode": "video-audio", "subtitles": [], "missing": []}
+
+        with (
+            patch.object(app, "run", side_effect=fake_run),
+            patch.object(store.Archive, "put", side_effect=ValueError("FFprobe menolak")),
+            redirect_stderr(io.StringIO()),
+        ):
+            with self.assertRaisesRegex(ValueError, "belum selesai"):
+                app.execute(ui.UI(True), job)
+        saved = store.load_job(job["id"])
+        # Both items were tried: the first failure did not stop the batch.
+        self.assertEqual(len(results), 2)
+        self.assertEqual([i["status"] for i in saved["items"]], ["failed", "failed"])
+        self.assertIn("belum tercatat", saved["items"][0]["error"]["message"])
 
     def test_oversized_download_log_is_rotated_when_a_worker_starts(self):
         log = self.state / "download.log"
@@ -579,10 +726,11 @@ class Display(unittest.TestCase):
             self.assertIn("█", lines[0])
         self.assertEqual(ui.SolidBar(50, 100, ui.PINK).text(20).plain, "█" * 10 + "░" * 10)
 
-    def tty(self, no_color=False, interrupt=False):
-        with Terminal(
-            [sys.executable, str(BASE / "app.py"), "preview"], BASE, no_color=no_color
-        ) as term:
+    def tty(self, no_color=False, interrupt=False, extra=None, shell=None):
+        command = [sys.executable, str(BASE / "app.py"), "preview"]
+        if shell:  # for example a redirection: a shell command line that wraps the preview
+            command = ["sh", "-c", shell.format(" ".join(command))]
+        with Terminal(command, BASE, extra=extra, no_color=no_color) as term:
             result = ""
             sent = False
             deadline = time.monotonic() + 15
@@ -615,7 +763,37 @@ class Display(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertNotIn("█", result.stderr)
-        self.assertLess(len(result.stderr.splitlines()), 25)
+        lines = result.stderr.splitlines()
+        # Plain output is a log, not a byte counter: a progress line about every tenth of each
+        # stream (the preview has three items of two streams), and nothing per update.
+        beats = [x for x in lines if x.startswith(("  video ", "  audio "))]
+        self.assertTrue(beats)
+        self.assertLessEqual(len(beats), 3 * 2 * 10)
+        self.assertLess(len(lines), 100)
+
+    def test_color_depth_follows_the_terminal(self):
+        # No COLORTERM and a 256-color TERM: the palette steps down to the 256-color table
+        # instead of sending 24-bit sequences the terminal would show wrongly.
+        out = self.tty(extra={"COLORTERM": ""})
+        self.assertNotIn("\x1b[38;2;", out)
+        self.assertIn("\x1b[38;5;", out)
+        self.assertIn("█", out)
+        # A 16-color terminal gets the basic colors.
+        out = self.tty(extra={"COLORTERM": "", "TERM": "xterm"})
+        self.assertNotIn("\x1b[38;2;", out)
+        self.assertNotIn("\x1b[38;5;", out)
+        self.assertRegex(out, r"\x1b\[(?:[0-9];)*(?:3[0-7]|9[0-7])m")
+
+    def test_an_empty_no_color_leaves_the_colors_on(self):
+        out = self.tty(extra={"NO_COLOR": ""})
+        self.assertIn("\x1b[38;2;", out)
+
+    @unittest.skipIf(os.name == "nt", "needs a POSIX shell for the redirection")
+    def test_a_redirected_stdout_does_not_turn_the_display_plain(self):
+        # Everything is drawn on stderr, which is still the terminal here.
+        out = self.tty(shell="{} > /dev/null")
+        self.assertIn("█", out)
+        self.assertRegex(out, r"\x1b\[[1-9][0-9]*A")
 
     def test_animation_pause_and_reset(self):
         screen = ui.Session(ui.UI(True), 1)
@@ -836,13 +1014,14 @@ class Presentation(unittest.TestCase):
     def test_stage_row_follows_the_worker_and_only_moves_forward(self):
         screen, _ = rich_ui()
         session = ui.Session(screen, 1, [{"title": "A"}])
-        self.assertEqual(len(panel(session)), 7)  # no item has started: no row yet
+        # One video has no batch to count: file bar, file name, speed and status only.
+        self.assertEqual(len(panel(session)), 4)  # no item has started: no stage row yet
 
         def row():
             return next(x for x in panel(session) if x.startswith("Tahap")).split()
 
         session.item_start(["metadata", "video", "audio", "finish"])
-        self.assertEqual(len(panel(session)), 8)
+        self.assertEqual(len(panel(session)), 5)
         self.assertEqual(row()[1:], "● Metadata → ○ Video → ○ Audio → ○ Gabung".split())
         session.event({"type": "stage", "message": "x", "phase": "video"})
         self.assertEqual(row()[1:], "✓ Metadata → ● Video → ○ Audio → ○ Gabung".split())
@@ -990,6 +1169,137 @@ class Presentation(unittest.TestCase):
             draws += 1
         thread.join()
         self.assertEqual(failures, [])
+
+    def test_a_single_video_panel_leaves_out_the_batch_rows(self):
+        screen, _ = rich_ui()
+        one = ui.Session(screen, 1, [{"title": "A"}])
+        lines = panel(one)
+        self.assertFalse(any(x.startswith(("Item", "Hasil", "Durasi")) for x in lines))
+        self.assertTrue(any(x.startswith("Status") and "berjalan" in x for x in lines))
+        # A batch keeps all of them.
+        lines = panel(ui.Session(screen, 2, [{"title": "A"}, {"title": "B"}]))
+        for row in ("Item", "Hasil", "Status", "Durasi"):
+            self.assertTrue(any(x.startswith(row) for x in lines), row)
+
+    def test_a_single_video_ends_without_a_tally_of_one(self):
+        screen, buffer = rich_ui(70)
+        with ui.Session(screen, 1) as session:
+            session.live = None
+            session.item_end("complete")
+        text = buffer.getvalue()
+        self.assertRegex(text, r"Selesai · \d+d")
+        self.assertNotIn("1/1 item", text)
+        self.assertNotIn("Disimpan", text)
+
+    def test_a_single_finished_video_is_a_card_not_a_log_line(self):
+        with tempfile.TemporaryDirectory() as folder:
+            video = Path(folder) / "video" / "Judul [abc] - 1080p.mkv"
+            video.parent.mkdir()
+            video.write_bytes(b"x" * 2048)
+            job = {
+                "id": "abc123",
+                "status": "complete",
+                "output": folder,
+                "items": [
+                    {
+                        "title": "Judul",
+                        "status": "complete",
+                        "result": {"path": str(video)},
+                        "choice": {
+                            "mode": "video-audio",
+                            "actual_quality": 1080,
+                            "vcodec": "vp9",
+                            "acodec": "opus",
+                        },
+                    }
+                ],
+            }
+            screen, buffer = rich_ui(80)
+            screen.report(job, Path(folder) / "download.log")
+            text = buffer.getvalue()
+            self.assertIn("Judul", text)
+            self.assertIn("1080p · VP9 + Opus · MKV · 2.0 KB", text)
+            self.assertIn("video/Judul [abc] - 1080p.mkv", text)
+            self.assertIn("abc123", text)
+            # Plain output keeps the line per file that scripts and logs already read.
+            with redirect_stderr(io.StringIO()) as captured:
+                ui.UI(True).report(job, Path(folder) / "download.log")
+            self.assertIn("[+] video/Judul [abc] - 1080p.mkv", captured.getvalue())
+
+    def test_plain_progress_is_reported_about_every_tenth_of_a_file(self):
+        now = [0.0]
+        with redirect_stderr(io.StringIO()) as captured:
+            screen = ui.Session(ui.UI(True), 1)
+            screen.now = lambda: now[0]
+            screen.event({"type": "start", "name": "x", "stream": "video"})
+            for got in range(0, 1001, 25):
+                screen.event({"type": "progress", "downloaded": got, "total": 1000, "speed": 500})
+        lines = [x for x in captured.getvalue().splitlines() if x.startswith("  video")]
+        self.assertEqual(len(lines), 10)
+        self.assertEqual(lines[0], "  video 10% · 100 B/1000 B · 500 B/s")
+        self.assertTrue(lines[-1].startswith("  video 100%"))
+        self.assertTrue(all(line.isascii() or "·" in line for line in lines))
+        # The next file counts from zero again.
+        with redirect_stderr(io.StringIO()) as captured:
+            screen.event({"type": "start", "name": "y", "stream": "audio"})
+            screen.event({"type": "progress", "downloaded": 300, "total": 1000, "speed": 1})
+        self.assertIn("  audio 30%", captured.getvalue())
+
+    def test_plain_progress_without_a_size_is_reported_once_a_minute(self):
+        now = [0.0]
+        with redirect_stderr(io.StringIO()) as captured:
+            screen = ui.Session(ui.UI(True), 1)
+            screen.now = lambda: now[0]
+            screen.event({"type": "start", "name": "x", "stream": "video"})
+            for moment in (10, 59, 61, 100, 121, 125):
+                now[0] = moment
+                screen.event({"type": "progress", "downloaded": moment * 10, "speed": 10})
+        lines = [x for x in captured.getvalue().splitlines() if x.startswith("  video")]
+        self.assertEqual(len(lines), 2)  # at 61 s and at 121 s
+
+    def test_the_live_display_writes_no_plain_progress_lines(self):
+        screen, buffer = rich_ui()
+        session = ui.Session(screen, 1)
+        session.event({"type": "start", "name": "x", "stream": "video"})
+        session.event({"type": "progress", "downloaded": 500, "total": 1000, "speed": 1})
+        self.assertNotIn("video 50%", buffer.getvalue())
+
+    def test_error_ends_with_the_command_that_carries_on(self):
+        with redirect_stderr(io.StringIO()) as captured:
+            ui.UI(True).error(
+                "Perlu login. Lalu lanjutkan:", None, "./youtube-downloader resume abc"
+            )
+        lines = captured.getvalue().splitlines()
+        self.assertEqual(lines[0], "! GAGAL · Perlu login. Lalu lanjutkan:")
+        self.assertEqual(lines[-1], "  ./youtube-downloader resume abc")
+        screen, buffer = rich_ui()
+        screen.error("Perlu login. Lalu lanjutkan:", None, "./youtube-downloader resume abc")
+        self.assertIn("    ./youtube-downloader resume abc", buffer.getvalue())
+
+    def test_the_display_follows_stderr_and_the_environment(self):
+        def build(stderr_is_tty, **environment):
+            fake = io.StringIO()
+            fake.isatty = lambda: stderr_is_tty
+            env = {"TERM": "xterm-256color", **environment}
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(ui, "configure_terminal", return_value=True),
+                patch.object(ui.sys, "stderr", fake),
+                # stdout is captured or redirected, as it is when the saved paths are collected.
+                patch.object(ui.sys.stdout, "isatty", return_value=False, create=True),
+            ):
+                return ui.UI(False)
+
+        self.assertFalse(build(True).plain)  # a redirected stdout does not make it plain
+        self.assertTrue(build(False).plain)
+        self.assertTrue(build(True, TERM="dumb").plain)
+        self.assertFalse(build(True, NO_COLOR="").no_color)  # empty means not set
+        self.assertTrue(build(True, NO_COLOR="1").no_color)
+        self.assertIsNone(build(True).depth)  # detected, not forced to 24 bits
+        self.assertIs(build(True, NO_COLOR="1").depth, ui.ColorDepth.DEPTH_1_BIT)
+        self.assertEqual(build(True, COLORTERM="truecolor").console.color_system, "truecolor")
+        self.assertEqual(build(True).console.color_system, "256")
+        self.assertEqual(build(True, TERM="xterm").console.color_system, "standard")
 
     def test_activity_updates_its_message_in_both_modes(self):
         with redirect_stderr(io.StringIO()) as captured:

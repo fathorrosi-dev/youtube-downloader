@@ -2,19 +2,32 @@
 
 import argparse
 import os
+import shlex
+import sqlite3
 import sys
 import time
 import platform
 import subprocess
 import shutil
-from compat import native_output, platform_key, deno_path, foreign_path, lock_requirements
+from contextlib import nullcontext
+from datetime import datetime
+from compat import (
+    native_output,
+    platform_key,
+    deno_path,
+    foreign_path,
+    folder_size,
+    lock_requirements,
+)
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from importlib.metadata import PackageNotFoundError, version
 from model import (
     VERSION,
+    PIN_WARN_DAYS,
     SelectionError,
     valid_url,
+    valid_browser,
     qualities,
     languages,
     default_language,
@@ -30,11 +43,96 @@ from model import (
     has_video,
     has_audio,
     resolution,
+    release_age_days,
 )
-from store import BASE, STATE, lock, settings, new_job, load_job, save_job, Archive
+from store import (
+    BASE,
+    STATE,
+    lock,
+    settings,
+    new_job,
+    load_job,
+    save_job,
+    list_jobs,
+    resumable_jobs,
+    Archive,
+)
 from runner import run, WorkerError
 from rich.text import Text
 from ui import UI, Session, Cancelled, BLUE, DIM, RED, clock, size, tidy
+
+# Words that are commands, not links.
+COMMANDS = ("status", "preview", "resume", "update", "clean", "rebase-media")
+# Run through setup.sh / migrate.sh / rollback.sh: they change the Python environment this very
+# process is running in, which a Windows process cannot do to itself.
+SCRIPT_COMMANDS = ("setup", "migrate", "rollback")
+
+UNSET = object()
+# What --yes answers for every prompt that no flag answered.
+YES_DEFAULTS = {
+    "mode": "video-audio",
+    "compatible": False,
+    "quality": "best",
+    "lang": "original",
+    "audio_format": "original",
+    "audio_manual": False,
+}
+# The flag behind each preset key, for messages.
+FLAGS = {
+    "mode": "--mode",
+    "compatible": "--format",
+    "quality": "--quality",
+    "lang": "--lang",
+    "audio_format": "--audio-format",
+    "subs": "--subs",
+}
+SUBTITLE_ORDER = ("manual", "automatic", "translated")
+
+
+def launcher():
+    """The command that starts this tool, written so it works from wherever it is pasted."""
+    name = "youtube-downloader.cmd" if os.name == "nt" else "youtube-downloader"
+    if os.path.samefile(os.getcwd(), BASE):
+        return (".\\" if os.name == "nt" else "./") + name
+    path = str(BASE / name)
+    return subprocess.list2cmdline([path]) if os.name == "nt" else shlex.quote(path)
+
+
+def resume_command(job_id, login=False):
+    return f"{launcher()} resume {job_id}" + (" --browser firefox" if login else "")
+
+
+class Stopped(ValueError):
+    """A batch that ended without finishing. It carries what the closing message needs."""
+
+    def __init__(self, message, job_id, login=False, category=None):
+        super().__init__(message)
+        self.job_id = job_id
+        self.login = login
+        self.category = category
+
+
+def ytdlp_age():
+    """Days since the installed yt-dlp was released, or None."""
+    try:
+        return release_age_days(version("yt-dlp"))
+    except PackageNotFoundError:
+        return None
+
+
+def stop_message(category):
+    """Why a batch stopped, and what to do before carrying on; the command follows it."""
+    if category == "authentication":
+        return "YouTube meminta login. Login di Firefox, lalu lanjutkan:"
+    if category == "rate_limit":
+        return "YouTube membatasi permintaan. Tunggu beberapa menit, lalu lanjutkan:"
+    if category == "network":
+        return "Tiga kegagalan jaringan berurutan. Periksa koneksi internet, lalu lanjutkan:"
+    text = "Tiga kegagalan berurutan; periksa log."
+    age = ytdlp_age()
+    if age is not None and age > PIN_WARN_DAYS:
+        text += f" yt-dlp rilis {age} hari lalu; coba jalankan update."
+    return text + " Lalu lanjutkan:"
 
 
 def inspect_url(url, browser=None, playlist=False):
@@ -78,27 +176,74 @@ class Steps:
         return (self.number, self.total)
 
 
-def wizard(ui, url, browser=None, output=None):
-    url = valid_url(url or ui.text("Tempel link YouTube:", label="Link"))
+def find_text(options, value):
+    for text, candidate in options:
+        if candidate == value and type(candidate) is type(value):
+            return text
+    return None
+
+
+def ask(ui, preset, key, title, options, label, step=None, previous=None, default=UNSET):
+    """One choice, answered in one of three ways: by a command-line flag, by the default under
+    --yes, or by the menu (with the earlier answer selected when the settings are being changed)."""
+    preset["_used"].add(key)
+    given = preset.get(key, UNSET)
+    if given is UNSET and preset.get("yes"):
+        given = YES_DEFAULTS[key]
+    if given is not UNSET:
+        text = find_text(options, given)
+        if text is None:
+            offered = ", ".join(str(v) for _, v in options if v != "manual")
+            raise SelectionError(
+                f"{FLAGS.get(key, key)} {given}: tidak tersedia. Pilihan: {offered}"
+            )
+        ui.answered(label, text, step)
+        return given
+    kwargs = {"label": label}
+    if step is not None:
+        kwargs["step"] = step
+    if previous and key in previous:
+        kwargs["default"] = previous[key]
+    elif default is not UNSET:
+        kwargs["default"] = default
+    return ui.choose(title, options, **kwargs)
+
+
+def choose_source(ui, url, preset):
     qs = parse_qs(urlparse(url).query)
     is_playlist = "list" in qs or urlparse(url).path == "/playlist"
+    if preset.get("playlist") and not is_playlist:
+        raise SelectionError("--playlist memerlukan link yang berisi playlist")
     if is_playlist and ("v" in qs or urlparse(url).hostname == "youtu.be"):
-        is_playlist = ui.choose(
+        if preset.get("playlist") or preset.get("items") is not None:
+            ui.answered("Sumber", "Playlist")
+            return True
+        if preset.get("yes"):
+            ui.answered("Sumber", "Video ini saja")
+            return False
+        return ui.choose(
             "Link berisi video dan playlist. Ambil yang mana?",
             [("Video ini saja", False), ("Playlist", True)],
             label="Sumber",
         )
-    with ui.activity("Mengambil informasi YouTube"):
-        initial = inspect_url(url, browser, is_playlist)
-    if initial.get("playlist"):
-        entries = initial["entries"]
-        if not entries:
-            raise ValueError("Playlist kosong atau tidak dapat diakses")
-        ui.say(
-            Text.assemble(
-                (initial["title"] or "Playlist", "bold"), (f" · {len(entries)} item", DIM)
-            )
-        )
+    return is_playlist
+
+
+def pick_entries(ui, initial, preset):
+    entries = initial["entries"]
+    if not entries:
+        raise ValueError("Playlist kosong atau tidak dapat diakses")
+    ui.say(
+        Text.assemble((initial["title"] or "Playlist", "bold"), (f" · {len(entries)} item", DIM))
+    )
+    wanted = preset.get("items")
+    if wanted is not None:
+        selected = [entries[i] for i in item_indices(wanted, len(entries))]
+        ui.answered("Item", f"{len(selected)} dari {len(entries)}")
+    elif preset.get("yes"):
+        selected = entries
+        ui.answered("Item", "semua item")
+    else:
         selection = ui.choose(
             "Pilih item playlist",
             [
@@ -127,53 +272,76 @@ def wizard(ui, url, browser=None, output=None):
                     break
                 except SelectionError as exc:
                     ui.say(exc, RED)
-        if not selected:
-            raise Cancelled()
-        metadata = []
-        unavailable = []
-        errors = 0
-        total = len(selected)
-        label = "Memeriksa kualitas dan subtitle"
-        with ui.activity(f"{label} · 0/{total}") as progress:
-            for number, entry in enumerate(selected, 1):
-                if progress:
-                    progress(f"{label} · {number}/{total}")
-                try:
-                    info = inspect_url(entry["url"], browser)
-                    metadata.append(info)
-                    errors = 0
-                except WorkerError as exc:
-                    unavailable.append({"title": entry["title"], "reason": str(exc)})
-                    if exc.category == "authentication":
-                        raise
-                    if exc.category not in ("unavailable",):
-                        errors += 1
-                    if errors >= 3:
-                        raise WorkerError(
-                            "Tiga kegagalan metadata berurutan; batch dihentikan. " + str(exc),
-                            exc.category,
-                        ) from exc
-        if unavailable:
-            ui.table(
-                ("Item tidak tersedia", "Alasan"), [(x["title"], x["reason"]) for x in unavailable]
-            )
+    if not selected:
+        raise Cancelled()
+    return selected
+
+
+def inspect_selection(ui, selected, browser):
+    """The metadata of every selected playlist item. One that is unavailable is listed and
+    skipped; a login request, a rate limit or three failures in a row stop the whole batch."""
+    metadata = []
+    unavailable = []
+    errors = 0
+    total = len(selected)
+    label = "Memeriksa kualitas dan subtitle"
+    with ui.activity(f"{label} · 0/{total}") as progress:
+        for number, entry in enumerate(selected, 1):
+            if progress:
+                progress(f"{label} · {number}/{total}")
+            try:
+                info = inspect_url(entry["url"], browser)
+                metadata.append(info)
+                errors = 0
+            except WorkerError as exc:
+                unavailable.append({"title": entry["title"], "reason": str(exc)})
+                if exc.category in ("authentication", "rate_limit"):
+                    raise
+                if exc.category not in ("unavailable",):
+                    errors += 1
+                if errors >= 3:
+                    raise WorkerError(
+                        "Tiga kegagalan metadata berurutan; batch dihentikan. " + str(exc),
+                        exc.category,
+                    ) from exc
+    if unavailable:
+        ui.table(
+            ("Item tidak tersedia", "Alasan"), [(x["title"], x["reason"]) for x in unavailable]
+        )
+    return metadata
+
+
+def collect_metadata(ui, url, browser, is_playlist, preset):
+    with ui.activity("Mengambil informasi YouTube"):
+        initial = inspect_url(url, browser, is_playlist)
+    if preset.get("items") is not None and not initial.get("playlist"):
+        raise SelectionError("--items hanya berlaku untuk playlist")
+    if initial.get("playlist"):
+        metadata = inspect_selection(ui, pick_entries(ui, initial, preset), browser)
     else:
         metadata = [initial]
     if not metadata:
         raise ValueError("Tidak ada item yang dapat diunduh")
-    if len(metadata) == 1:
-        info = metadata[0]
-        details = [
-            clock(info.get("duration")),
-            info.get("channel") or info.get("uploader") or "YouTube",
-        ]
-        largest = next((f for f in reversed(info["formats"]) if has_video(f)), None)
-        if largest:
-            shape = "Portrait" if largest["height"] > largest["width"] else "Landscape"
-            details.append(f"{shape} {largest['width']} × {largest['height']}")
-        ui.say(Text(info["title"], style="bold"))
-        ui.say(Text(" · ".join(details), style=DIM))
-    ui.say("")
+    return metadata
+
+
+def describe_single(ui, metadata):
+    if len(metadata) != 1:
+        return
+    info = metadata[0]
+    details = [
+        clock(info.get("duration")),
+        info.get("channel") or info.get("uploader") or "YouTube",
+    ]
+    largest = next((f for f in reversed(info["formats"]) if has_video(f)), None)
+    if largest:
+        shape = "Portrait" if largest["height"] > largest["width"] else "Landscape"
+        details.append(f"{shape} {largest['width']} × {largest['height']}")
+    ui.say(Text(info["title"], style="bold"))
+    ui.say(Text(" · ".join(details), style=DIM))
+
+
+def merge_tracks(metadata):
     all_tracks = {}
     for m in metadata:
         for t in tracks(m):
@@ -183,31 +351,120 @@ def wizard(ui, url, browser=None, output=None):
                 else (t["language"], t["kind"], t["key"], t["origin"])
             )
             all_tracks.setdefault(identity, t)
-    mode = ui.choose(
+    return all_tracks
+
+
+def subtitle_identities(all_tracks, wanted):
+    """The track to take for each requested language (original captions before automatic ones
+    before translations), and the languages that have none."""
+    chosen, missing = [], []
+    for language in wanted:
+        candidates = [(i, t) for i, t in all_tracks.items() if t["language"] == language]
+        if not candidates:
+            missing.append(language)
+            continue
+        candidates.sort(
+            key=lambda c: (
+                SUBTITLE_ORDER.index(c[1]["kind"]) if c[1]["kind"] in SUBTITLE_ORDER else 9
+            )
+        )
+        chosen.append(candidates[0][0])
+    return chosen, missing
+
+
+def ask_subtitles(ui, preset, mode, compatible, metadata, all_tracks, step, previous):
+    """The subtitle tracks to keep, as identities into all_tracks."""
+    preset["_used"].add("subs")
+    wanted = preset.get("subs", UNSET)
+    if wanted is UNSET and preset.get("yes"):
+        wanted = []
+    if wanted is not UNSET:
+        chosen, missing = subtitle_identities(all_tracks, wanted)
+        ui.answered(
+            "Subtitle", ", ".join(all_tracks[i]["name"] for i in chosen) or "tanpa subtitle", step
+        )
+        if missing:
+            ui.say(Text("Subtitle tidak tersedia: " + ", ".join(missing), style=DIM))
+        return chosen, None
+    kwargs = {"default": previous["addon"]} if previous and "addon" in previous else {}
+    addon = ui.choose(
+        "Tambahan subtitle",
+        [("Tanpa subtitle", False), ("Pilih bahasa/track subtitle", True)],
+        step=step,
+        label="Subtitle",
+        **kwargs,
+    )
+    if not addon:
+        return [], False
+    names = {
+        "manual": "CC asli",
+        "automatic": "Caption otomatis",
+        "translated": "Terjemahan otomatis",
+    }
+    if mode == "audio":
+        ui.say(Text("Audio saja: subtitle disimpan sebagai file .srt.", style=DIM))
+    elif compatible:
+        ui.say(
+            Text(
+                "MP4 kompatibel: subtitle disimpan sebagai file .srt di folder subtitle.",
+                style=DIM,
+            )
+        )
+    options = [
+        (
+            f"{t['name']} · {names[t['kind']]}"
+            + (
+                " · sumber dipilih per video"
+                if len(metadata) > 1 and t["kind"] == "translated"
+                else ""
+            ),
+            identity,
+        )
+        for identity, t in all_tracks.items()
+    ]
+    extra = {"checked": previous["chosen"]} if previous and previous.get("chosen") else {}
+    return ui.checkboxes("Track subtitle", options, **extra), True
+
+
+def ask_settings(ui, metadata, all_tracks, preset, previous=None):
+    """Every numbered prompt after the link. `previous` holds the earlier answers when the person
+    chose to change them."""
+    preset["_used"] = set()
+    mode = ask(
+        ui,
+        preset,
+        "mode",
         "Apa yang ingin diunduh?",
         [
             ("Video + audio", "video-audio"),
             ("Audio saja", "audio"),
             ("Video saja — tanpa suara", "video"),
         ],
-        label="Unduh apa?",
+        "Unduh apa?",
+        previous=previous,
     )
     steps = Steps(len(settings_plan(mode, bool(all_tracks))))
+    answers = {"mode": mode}
     quality = "best"
     manual = False
     audio_format = "original"
     compatible = False
     if mode != "audio":
         sound = " + AAC" if mode == "video-audio" else ""
-        compatible = ui.choose(
+        compatible = ask(
+            ui,
+            preset,
+            "compatible",
             "Format file",
             [
                 ("Otomatis · MKV atau MP4 sesuai codec · Direkomendasikan", False),
                 (f"MP4 kompatibel · H.264/AV1{sound} · iPhone, Mac, editor", True),
             ],
-            step=steps.next(),
-            label="Format file",
+            "Format file",
+            steps.next(),
+            previous,
         )
+        answers["compatible"] = compatible
         tiers = sorted(
             {q for m in metadata for q in qualities(m, compatible)},
             reverse=True,
@@ -231,75 +488,89 @@ def wizard(ui, url, browser=None, output=None):
         title = "Pilih kualitas"
         if len(metadata) > 1:
             title += " · playlist boleh turun kualitas, tidak naik otomatis"
-        quality = ui.choose(title, options, default="best", step=steps.next(), label="Kualitas")
+        quality = ask(
+            ui, preset, "quality", title, options, "Kualitas", steps.next(), previous, "best"
+        )
+        answers["quality"] = quality
         manual = quality == "manual"
         if manual:
             quality = "best"
     lang = "original"
     if mode != "video":
         available = sorted({lang for m in metadata for lang in languages(m)})
-        lang = ui.choose(
+        lang = ask(
+            ui,
+            preset,
+            "lang",
             "Bahasa audio",
             [("Bahasa asli per video", "original")] + [(x, x) for x in available],
-            step=steps.next(),
-            label="Bahasa audio",
+            "Bahasa audio",
+            steps.next(),
+            previous,
         )
+        answers["lang"] = lang
         if mode == "audio":
-            audio_format = ui.choose(
+            audio_format = ask(
+                ui,
+                preset,
+                "audio_format",
                 "Format audio",
                 [
                     ("Audio asli terbaik · tanpa konversi", "original"),
                     ("MP3 · konversi lossy", "mp3"),
                 ],
-                step=steps.next(),
-                label="Format audio",
+                "Format audio",
+                steps.next(),
+                previous,
             )
-            manual = ui.choose(
+            answers["audio_format"] = audio_format
+            manual = ask(
+                ui,
+                preset,
+                "audio_manual",
                 "Pemilihan kualitas audio",
                 [("Audio terbaik otomatis", False), ("Pilih format/bitrate per item", True)],
-                step=steps.next(),
-                label="Kualitas audio",
+                "Kualitas audio",
+                steps.next(),
+                previous,
             )
+            answers["audio_manual"] = manual
     chosen = []
     if all_tracks:
-        addon = ui.choose(
-            "Tambahan subtitle",
-            [("Tanpa subtitle", False), ("Pilih bahasa/track subtitle", True)],
-            step=steps.next(),
-            label="Subtitle",
+        chosen, addon = ask_subtitles(
+            ui, preset, mode, compatible, metadata, all_tracks, steps.next(), previous
         )
-        if addon:
-            names = {
-                "manual": "CC asli",
-                "automatic": "Caption otomatis",
-                "translated": "Terjemahan otomatis",
-            }
-            if mode == "audio":
-                ui.say(Text("Audio saja: subtitle disimpan sebagai file .srt.", style=DIM))
-            elif compatible:
-                ui.say(
-                    Text(
-                        "MP4 kompatibel: subtitle disimpan sebagai file .srt di folder subtitle.",
-                        style=DIM,
-                    )
-                )
-            chosen = ui.checkboxes(
-                "Track subtitle",
-                [
-                    (
-                        f"{t['name']} · {names[t['kind']]}"
-                        + (
-                            " · sumber dipilih per video"
-                            if len(metadata) > 1 and t["kind"] == "translated"
-                            else ""
-                        ),
-                        identity,
-                    )
-                    for identity, t in all_tracks.items()
-                ],
-            )
+        answers["chosen"] = chosen
+        if addon is not None:
+            answers["addon"] = addon
     else:
+        preset["_used"].add("subs")
         ui.say(Text("YouTube tidak mengembalikan subtitle untuk pilihan ini.", style=DIM))
+    unused = [flag for key, flag in FLAGS.items() if key in preset and key not in preset["_used"]]
+    if unused:
+        raise SelectionError("Flag tidak berlaku untuk pilihan ini: " + ", ".join(unused))
+    return {
+        "mode": mode,
+        "compatible": compatible,
+        "quality": quality,
+        "manual": manual,
+        "lang": lang,
+        "audio_format": audio_format,
+        "chosen": chosen,
+        "steps": steps,
+        "answers": answers,
+    }
+
+
+def build_items(ui, metadata, all_tracks, settings_):
+    """The job items for the answers given, and the summary rows that describe them."""
+    mode = settings_["mode"]
+    quality = settings_["quality"]
+    manual = settings_["manual"]
+    lang = settings_["lang"]
+    audio_format = settings_["audio_format"]
+    compatible = settings_["compatible"]
+    chosen = settings_["chosen"]
     items = []
     rows = []
     not_mp4 = 0
@@ -398,9 +669,10 @@ def wizard(ui, url, browser=None, output=None):
             if extension == "mp4":
                 details += " (.srt terpisah)"
         rows.append((m["title"], actual, details))
-    if not items:
-        raise ValueError("Tidak ada item yang memenuhi pilihan")
-    root = str(native_output(output or settings()["output"]))
+    return items, rows, not_mp4
+
+
+def show_summary(ui, rows, root, not_mp4):
     ui.say("")
     if len(rows) == 1:
         ui.table(("Video", "Kualitas", "Berkas", "Simpan di"), [(*rows[0], tidy(root))])
@@ -416,16 +688,51 @@ def wizard(ui, url, browser=None, output=None):
             )
         )
     ui.say("")
-    if (
-        ui.choose(
-            "Mulai download?",
-            [("Mulai", True), ("Batal", False)],
-            step=steps.next(),
-            label="Mulai?",
+
+
+def confirm(ui, preset, steps):
+    """True to start, "edit" to change the answers, False to cancel."""
+    step = steps.next()
+    if preset.get("yes"):
+        ui.answered("Mulai?", "Ya", step)
+        return True
+    return ui.choose(
+        "Mulai download?",
+        [("Mulai", True), ("Ubah pilihan", "edit"), ("Batal", False)],
+        step=step,
+        label="Mulai?",
+    )
+
+
+def wizard(ui, url, browser=None, output=None, preset=None):
+    """Turn a link and a series of answers into a saved job.
+
+    The answers come from the menus, from command-line flags (`preset`), or from --yes."""
+    preset = {} if preset is None else preset
+    preset["_used"] = set()
+    url = valid_url(url or ui.text("Tempel link YouTube:", label="Link"))
+    root = str(native_output(output or settings()["output"]))
+    is_playlist = choose_source(ui, url, preset)
+    metadata = collect_metadata(ui, url, browser, is_playlist, preset)
+    describe_single(ui, metadata)
+    ui.say("")
+    all_tracks = merge_tracks(metadata)
+    answers = None
+    while True:
+        answers = ask_settings(
+            ui, metadata, all_tracks, preset, answers["answers"] if answers else None
         )
-        is False
-    ):
-        raise Cancelled()
+        items, rows, not_mp4 = build_items(ui, metadata, all_tracks, answers)
+        if not items:
+            raise ValueError("Tidak ada item yang memenuhi pilihan")
+        show_summary(ui, rows, root, not_mp4)
+        decision = confirm(ui, preset, answers["steps"])
+        if decision == "edit":
+            ui.say(Text("Mengubah pilihan · info video tidak diambil ulang", style=DIM))
+            continue
+        if decision is False:
+            raise Cancelled()
+        break
     job = new_job(items, root, browser)
     ui.say(Text.assemble(("Job tersimpan · ", DIM), (job["id"], BLUE)))
     return job
@@ -470,7 +777,22 @@ def execute(ui, job):
                     session.item_start(phases(item))
                     try:
                         result = run(request, session.event)
-                        archive.put(key, result)
+                        try:
+                            archive.put(key, result)
+                        except (
+                            ValueError,
+                            OSError,
+                            sqlite3.Error,
+                            subprocess.SubprocessError,
+                        ) as exc:
+                            # The file is in place; only the record is missing. This item fails,
+                            # the batch goes on, and resume records the file without downloading.
+                            raise WorkerError(
+                                "Hasil tersimpan, tetapi belum tercatat di arsip ("
+                                + str(exc)
+                                + "); resume akan mencatatnya",
+                                "system",
+                            ) from exc
                         item["result"] = result
                         item["status"] = "partial" if result.get("missing") else "complete"
                         item.pop("error", None)
@@ -486,15 +808,13 @@ def execute(ui, job):
                         else:
                             consecutive = 0
                         save_job(job)
-                        if exc.category == "authentication" or consecutive >= 3:
+                        if exc.category in ("authentication", "rate_limit") or consecutive >= 3:
                             job["status"] = "blocked"
-                            raise ValueError(
-                                "Batch dihentikan. "
-                                + (
-                                    "Login di Firefox lalu ulangi dengan pilihan sesi yang benar."
-                                    if exc.category == "authentication"
-                                    else "Tiga kegagalan sistem berurutan; periksa log/dependensi sebelum resume."
-                                )
+                            raise Stopped(
+                                "Batch dihentikan. " + stop_message(exc.category),
+                                job["id"],
+                                login=exc.category == "authentication",
+                                category=exc.category,
                             ) from exc
                     save_job(job)
             except (KeyboardInterrupt, Cancelled):
@@ -512,9 +832,46 @@ def execute(ui, job):
         archive.close()
         ui.report(job, STATE / "download.log")
     if job["status"] != "complete":
-        raise ValueError(
-            "Ada item/subtitle belum selesai; resume " + job["id"] + " untuk mencoba lagi."
+        raise Stopped("Ada item atau subtitle yang belum selesai. Lanjutkan:", job["id"])
+
+
+def emit_paths(job, scripted):
+    """The saved files, one path per line on stdout, for a caller that captures it. The display
+    is on stderr, so stdout carries nothing else."""
+    if not (scripted or not sys.stdout.isatty()):
+        return
+    for item in job["items"]:
+        result = item.get("result")
+        if item.get("status") in ("complete", "partial") and result:
+            print(result["path"], flush=True)
+
+
+def pin_note(name, actual):
+    """For yt-dlp, how long ago this release came out: downloads fail when YouTube changes and
+    the pinned version is old, and the date is part of the version."""
+    age = release_age_days(actual) if name.lower() == "yt-dlp" else None
+    if age is None:
+        return ""
+    note = f" · rilis {age} hari lalu"
+    if age > PIN_WARN_DAYS:
+        note += " · sudah lama; jika unduhan gagal, jalankan update"
+    return note
+
+
+def state_note():
+    note = str(STATE)
+    try:
+        import maintenance
+
+        note += " · " + size(folder_size(STATE))
+        reclaim = sum(
+            w for entries in maintenance.clean_plan(STATE.parent).values() for _, w in entries
         )
+        if reclaim:
+            note += f" · {size(reclaim)} dapat dibersihkan (jalankan clean)"
+    except OSError:
+        pass
+    return note
 
 
 def status(ui):
@@ -524,7 +881,7 @@ def status(ui):
         ("Python", platform.python_version() + " · " + sys.executable),
         ("Tools", str(BASE)),
         ("Media", str(Path(settings()["output"]).expanduser())),
-        ("Catatan", str(STATE)),
+        ("Catatan", state_note()),
     ]
     try:
         from packaging.requirements import Requirement
@@ -543,7 +900,12 @@ def status(ui):
             continue
         mismatch = " · TIDAK SESUAI " + str(dependency.specifier)
         rows.append(
-            (dependency.name, actual + ("" if actual in dependency.specifier else mismatch))
+            (
+                dependency.name,
+                actual
+                + ("" if actual in dependency.specifier else mismatch)
+                + pin_note(dependency.name, actual),
+            )
         )
     for name in ("ffmpeg", "ffprobe", "deno"):
         binary = str(deno_path(BASE)) if name == "deno" else shutil.which(name)
@@ -562,16 +924,76 @@ def status(ui):
         except (OSError, TypeError, subprocess.TimeoutExpired):
             rows.append((name, "tidak tersedia · jalankan setup --check"))
     ui.table(("Informasi", "Nilai"), rows)
-    jobs = (
-        sorted((STATE / "jobs").glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]
-        if (STATE / "jobs").exists()
-        else []
+    jobs, unreadable = list_jobs()
+    table = [(j.get("id", "?"), j.get("status", "?"), len(j.get("items") or [])) for j in jobs[:10]]
+    table += [(name, "tidak terbaca", "-") for name, _ in unreadable]
+    if table:
+        ui.table(("Job", "Status", "Item"), table)
+    for _name, reason in unreadable:
+        ui.say(Text(reason, style=DIM))
+
+
+def job_when(job):
+    try:
+        stamp = job.get("updated_at") or job["created_at"]
+        return datetime.fromisoformat(stamp).astimezone().strftime("%Y-%m-%d %H:%M")
+    except (KeyError, TypeError, ValueError):
+        return "-"
+
+
+def job_label(job):
+    items = job.get("items") or []
+    done = sum(1 for i in items if i.get("status") == "complete")
+    return f"{job.get('id')} · {job.get('status')} · {done}/{len(items)} selesai · {job_when(job)}"
+
+
+def choose_job(ui, args):
+    """The job `resume` carries on with when no ID was given: the newest one that has something
+    left to do (--last), or the one picked from a menu."""
+    if args.last and args.job:
+        raise ValueError("Gunakan resume ID_JOB atau resume --last, bukan keduanya")
+    if not args.last and not sys.stdin.isatty():
+        raise ValueError("Gunakan resume ID_JOB atau resume --last")
+    candidates = resumable_jobs(list_jobs()[0])
+    if not candidates:
+        raise ValueError("Tidak ada job yang bisa dilanjutkan")
+    if args.last:
+        return candidates[0]
+    picked = ui.choose(
+        "Job mana yang dilanjutkan?", [(job_label(j), j["id"]) for j in candidates], label="Job"
     )
-    if jobs:
-        ui.table(
-            ("Job", "Status", "Item"),
-            [(j["id"], j["status"], len(j["items"])) for j in (load_job(p.stem) for p in jobs)],
-        )
+    return load_job(picked)
+
+
+def clean_command(ui, args):
+    import maintenance
+
+    with lock() if args.apply else nullcontext():
+        rows = maintenance.clean(BASE, args.apply, args.days)
+    if not rows:
+        ui.say("Tidak ada yang perlu dibersihkan.")
+        return 0
+    ui.table(
+        ("Kategori", "Jumlah", "Ukuran"),
+        [(label, count, size(weight)) for label, count, weight in rows],
+    )
+    total = size(sum(weight for _, _, weight in rows))
+    ui.say(
+        "Dibebaskan " + total
+        if args.apply
+        else f"Dapat dibebaskan {total} · jalankan clean --apply untuk menghapusnya"
+    )
+    return 0
+
+
+def rebase_command(args):
+    if not args.old_root or not args.new_root:
+        raise ValueError("Gunakan rebase-media --from LAMA --to BARU [--dry-run]")
+    from media_migration import rebase_media
+
+    with lock():
+        rebase_media(BASE, args.old_root, args.new_root, args.dry_run)
+    return 0
 
 
 def preview(ui):
@@ -633,22 +1055,107 @@ def preview(ui):
     ui.say("Preview selesai; tidak ada jaringan, file, atau download yang dibuat.")
 
 
-def main():
-    os.umask(0o077)
+def quality_arg(text):
+    if text == "best":
+        return text
+    if text.isdigit() and 100 <= int(text) <= 9999:
+        return int(text)
+    raise argparse.ArgumentTypeError("gunakan best atau tinggi video, misalnya 1080")
+
+
+EPILOG = """contoh:
+  youtube-downloader LINK                  wizard interaktif
+  youtube-downloader LINK --yes --quality 1080 --subs en
+                                           tanpa menu; path hasil dicetak ke stdout
+  youtube-downloader resume                pilih job yang dilanjutkan (resume --last: yang terbaru)
+  youtube-downloader status                versi, dependensi, umur yt-dlp, job, ukuran .state
+  youtube-downloader clean [--apply]       lihat atau hapus sisa di .state
+  youtube-downloader update [--check]      periksa atau pasang rilis stabil
+  youtube-downloader rebase-media --from LAMA --to BARU [--dry-run]
+
+setup.sh, migrate.sh, dan rollback.sh (setup.cmd, dst. di Windows) mengubah lingkungan Python
+dan dijalankan terpisah dari perintah ini."""
+
+
+def build_parser():
     parser = argparse.ArgumentParser(
-        description="Download YouTube: pilih video/audio, kualitas, dan subtitle."
+        prog="youtube-downloader",
+        description="Download YouTube: pilih video/audio, kualitas, dan subtitle.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--version", action="version", version=f"youtube-downloader {VERSION}")
     parser.add_argument(
-        "action", nargs="?", help="Link YouTube, status, preview, resume, atau update"
+        "action",
+        nargs="?",
+        help="Link YouTube, atau: status, preview, resume, update, clean, rebase-media",
     )
     parser.add_argument("job", nargs="?", help="ID job untuk resume")
-    parser.add_argument("--plain", action="store_true")
+    parser.add_argument("--plain", action="store_true", help="Keluaran teks biasa tanpa warna")
     parser.add_argument("--browser", help="Opsional: firefox atau firefox:/jalur/profil")
     parser.add_argument("--output", help="Folder hasil alternatif")
     parser.add_argument("--check", action="store_true", help="Update: periksa rilis tanpa memasang")
     parser.add_argument("--wait", action="store_true", help="Update: tunggu download aktif selesai")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--last", action="store_true", help="Resume: job terbaru yang belum selesai"
+    )
+    parser.add_argument("--apply", action="store_true", help="Clean: hapus, bukan hanya daftar")
+    parser.add_argument("--days", type=int, default=30, help="Clean: umur cadangan media (hari)")
+    parser.add_argument("--from", dest="old_root", help="Rebase-media: akar media lama")
+    parser.add_argument("--to", dest="new_root", help="Rebase-media: akar media baru")
+    parser.add_argument("--dry-run", action="store_true", help="Rebase-media: tanpa mengubah")
+    scripting = parser.add_argument_group(
+        "tanpa menu (untuk link)", "Jawaban untuk pertanyaan wizard; --yes memakai bawaan sisanya."
+    )
+    scripting.add_argument("--mode", choices=["video-audio", "audio", "video"])
+    scripting.add_argument("--quality", type=quality_arg, help="best atau tinggi video, mis. 1080")
+    scripting.add_argument("--format", choices=["auto", "mp4"], help="mp4 = MP4 kompatibel")
+    scripting.add_argument("--lang", help="Bahasa audio, atau original")
+    scripting.add_argument("--audio-format", choices=["original", "mp3"])
+    scripting.add_argument("--subs", help="Bahasa subtitle dipisah koma, atau none")
+    scripting.add_argument("--items", help="Playlist: nomor/rentang, mis. 1,3,5-10, atau all")
+    scripting.add_argument(
+        "--playlist", action="store_true", help="Link video+playlist: ambil playlist"
+    )
+    scripting.add_argument(
+        "--yes", action="store_true", help="Mulai tanpa bertanya; tanpa terminal"
+    )
+    return parser
+
+
+def scripted_preset(args):
+    """The answers the command line gave, by the key of the prompt they answer."""
+    preset = {}
+    if args.mode:
+        preset["mode"] = args.mode
+    if args.format:
+        preset["compatible"] = args.format == "mp4"
+    if args.quality is not None:
+        preset["quality"] = args.quality
+    if args.lang:
+        preset["lang"] = args.lang
+    if args.audio_format:
+        preset["audio_format"] = args.audio_format
+    if args.subs is not None:
+        preset["subs"] = (
+            []
+            if args.subs.strip().lower() == "none"
+            else [x.strip() for x in args.subs.split(",") if x.strip()]
+        )
+    if args.items:
+        preset["items"] = args.items
+    if args.playlist:
+        preset["playlist"] = True
+    if args.yes:
+        preset["yes"] = True
+    return preset
+
+
+def main(argv=None):
+    os.umask(0o077)
+    args = build_parser().parse_args(argv)
     ui = UI(args.plain)
+    job = None
     try:
         if args.action == "update":
             if args.job or args.browser or args.output:
@@ -660,21 +1167,32 @@ def main():
             )
         if args.check or args.wait:
             raise ValueError("--check/--wait hanya digunakan dengan update")
+        preset = scripted_preset(args)
+        if args.action in COMMANDS and preset:
+            raise ValueError("Flag tanpa menu hanya untuk membuat job dari link")
+        if args.action in SCRIPT_COMMANDS:
+            ext = "cmd" if os.name == "nt" else "sh"
+            raise ValueError(
+                f"{args.action} dijalankan lewat {args.action}.{ext}: perintah itu mengubah "
+                "lingkungan Python yang sedang dipakai"
+            )
         if args.action == "preview":
             preview(ui)
             return 0
         if args.action == "status":
             status(ui)
             return 0
+        if args.action == "clean":
+            return clean_command(ui, args)
+        if args.action == "rebase-media":
+            return rebase_command(args)
         ui.banner(VERSION)
         ui.say("")
-        if args.browser and not (args.browser == "firefox" or args.browser.startswith("firefox:")):
-            raise ValueError("Pilihan browser: firefox atau firefox:/jalur/profil")
+        if args.browser:
+            valid_browser(args.browser)
         with lock():
             if args.action == "resume":
-                if not args.job:
-                    raise ValueError("Gunakan resume ID_JOB")
-                job = load_job(args.job)
+                job = load_job(args.job) if args.job and not args.last else choose_job(ui, args)
                 if args.browser:
                     job["browser"] = args.browser
                     job["platform"] = platform_key()
@@ -683,25 +1201,35 @@ def main():
             else:
                 if args.job:
                     raise ValueError("Argumen tambahan tidak valid")
-                if not sys.stdin.isatty():
+                if not (sys.stdin.isatty() or preset.get("yes")):
                     raise ValueError(
-                        "Wizard membutuhkan terminal. Gunakan resume ID_JOB untuk job yang sudah tersimpan."
+                        "Wizard membutuhkan terminal. Gunakan --yes (dengan flag pilihan) untuk "
+                        "berjalan tanpa terminal, atau resume ID_JOB untuk job yang sudah tersimpan."
                     )
                 job = wizard(
-                    ui, args.action, args.browser or settings().get("browser"), args.output
+                    ui, args.action, args.browser or settings().get("browser"), args.output, preset
                 )
-            execute(ui, job)
+            try:
+                execute(ui, job)
+            finally:
+                emit_paths(job, bool(preset.get("yes")))
         return 0
     except (KeyboardInterrupt, Cancelled):
-        ui.say(
-            "Pembaruan dihentikan sebelum pemasangan."
-            if args.action == "update"
-            else "Dihentikan; job yang sudah tersimpan dapat dilanjutkan dengan resume ID_JOB.",
-            BLUE,
-        )
+        if args.action == "update":
+            ui.say("Pembaruan dihentikan sebelum pemasangan.", BLUE)
+        elif job:
+            ui.say("Dihentikan. Job tersimpan; lanjutkan dengan:", BLUE)
+            ui.say(Text("    " + resume_command(job["id"]), style=BLUE))
+        else:
+            ui.say("Dihentikan sebelum ada job yang tersimpan.", BLUE)
         return 130
+    except Stopped as exc:
+        ui.error(str(exc), STATE / "download.log", resume_command(exc.job_id, exc.login))
+        return 1
     except Exception as exc:
-        ui.error(str(exc), STATE / ("update.log" if args.action == "update" else "download.log"))
+        log = STATE / ("update.log" if args.action == "update" else "download.log")
+        # A usage error never wrote a log: name the file only if there is one to read.
+        ui.error(str(exc), log if log.exists() else None)
         return 1
 
 

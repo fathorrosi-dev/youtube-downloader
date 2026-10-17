@@ -16,6 +16,7 @@ from rich.spinner import Spinner
 import questionary
 from prompt_toolkit.output import ColorDepth
 from compat import configure_terminal
+from model import codec_name
 
 PINK = "#FFC2D4"
 RED = "#E8384F"
@@ -224,21 +225,23 @@ MAX_REPORT_ROWS = 30
 class UI:
     def __init__(self, plain=False):
         vt = configure_terminal()
-        self.plain = (
-            plain
-            or not vt
-            or not (sys.stdout.isatty() and sys.stderr.isatty())
-            or os.environ.get("TERM") == "dumb"
-        )
+        # NO_COLOR counts only when it has a value (no-color.org): an empty one means "not set".
+        self.no_color = bool(os.environ.get("NO_COLOR"))
+        # All of this tool's display is written to stderr, so stderr decides how it looks. A
+        # stdout that is captured or redirected (the saved paths go there) must not turn a
+        # terminal that can draw the panel into plain text.
+        self.plain = plain or not vt or not sys.stderr.isatty() or os.environ.get("TERM") == "dumb"
         self.console = Console(
             stderr=True,
             force_terminal=not self.plain,
             legacy_windows=False,
-            color_system="truecolor" if not self.plain else None,
-            no_color="NO_COLOR" in os.environ,
+            # Detected from COLORTERM/TERM: Rich and prompt_toolkit step the palette down to
+            # 256 or 16 colors by themselves when the terminal cannot show 24-bit color.
+            color_system=None if self.plain else "auto",
+            no_color=self.no_color,
             highlight=False,
         )
-        self.depth = ColorDepth.DEPTH_1_BIT if "NO_COLOR" in os.environ else ColorDepth.DEPTH_24_BIT
+        self.depth = ColorDepth.DEPTH_1_BIT if self.no_color else None
         self.glyph = PLAIN_GLYPHS if self.plain else GLYPHS
         self._reported_log = None
         self.style = (
@@ -253,7 +256,7 @@ class UI:
                     ("instruction", DIM),
                 ]
             )
-            if "NO_COLOR" not in os.environ
+            if not self.no_color
             else questionary.Style([])
         )
 
@@ -276,7 +279,9 @@ class UI:
         line.append("  " + version, style=DIM)
         self.say(line)
 
-    def error(self, message, log=None):
+    def error(self, message, log=None, command=None):
+        """The failure line, the log if it was not already shown, and the exact command that
+        carries on (a copy-paste line, so nobody has to remember the syntax)."""
         if self.plain:
             self.say("! GAGAL · " + str(message))
         else:
@@ -286,6 +291,8 @@ class UI:
             self.say(line)
         if log and str(log) != self._reported_log:
             self.facts([("Log", tidy(log))])
+        if command:
+            self.say(Text("    " + command, style=BLUE) if not self.plain else "  " + command)
 
     def facts(self, rows):
         """Technical references (folder, job, log) as dim label/value pairs."""
@@ -353,9 +360,52 @@ class UI:
         ):
             yield update
 
+    def card(self, item, root):
+        """A single finished video as a card: title, what it is, and where it is."""
+        result, choice = item.get("result"), item.get("choice")
+        if item.get("status") not in ("complete", "partial") or not result or not choice:
+            return None
+        path = Path(result["path"])
+        try:
+            shown = path.relative_to(root).as_posix()
+        except ValueError:
+            shown = str(path)
+        try:
+            weight = size(path.stat().st_size)
+        except OSError:
+            weight = "file tidak ditemukan"
+        parts = []
+        if choice.get("mode") == "audio":
+            parts.append("MP3" if choice.get("audio_format") == "mp3" else "audio asli")
+            if choice.get("audio_format") != "mp3" and choice.get("acodec"):
+                parts.append(codec_name(choice["acodec"]))
+        else:
+            if choice.get("actual_quality"):
+                parts.append(f"{choice['actual_quality']}p")
+            codecs = codec_name(choice.get("vcodec"))
+            if choice.get("mode") == "video-audio":
+                codecs += " + " + codec_name(choice.get("acodec"))
+            parts.append(codecs)
+        parts += [path.suffix[1:].upper(), weight]
+        title = Text(str(item.get("title") or item.get("id") or shown), style="bold")
+        if item["status"] == "partial":
+            title.append(" · subtitle belum lengkap", style=DIM)
+        grid = Table.grid(padding=(0, 1))
+        grid.add_column(width=1, no_wrap=True)
+        grid.add_column(overflow="fold")
+        kind = "warn" if item["status"] == "partial" else "ok"
+        grid.add_row(
+            Text(self.glyph[kind], style=BLUE if kind == "warn" else PINK),
+            Group(title, Text(" · ".join(parts), style=DIM), Text(shown, style=DIM)),
+        )
+        return grid
+
     def report(self, job, log):
         """What was saved where, then folder, job and log, once the batch has ended."""
         root = Path(job["output"])
+        card = (
+            self.card(job["items"][0], root) if len(job["items"]) == 1 and not self.plain else None
+        )
         rows = []
         for item in job["items"]:
             status = item.get("status")
@@ -382,6 +432,8 @@ class UI:
         if rows and self.plain:
             for kind, name, detail in rows[:MAX_REPORT_ROWS]:
                 self.say(f"[{self.glyph[kind]}] {name} ({detail})")
+        elif card is not None:
+            self.console.print(Padding(card, (1, 0, 1, 2)))
         elif rows:
             grid = Table.grid(padding=(0, 1))
             grid.add_column(width=1, no_wrap=True)
@@ -422,6 +474,11 @@ class UI:
             Text(str(answer), style=PINK),
         )
         self.console.print(grid)
+
+    def answered(self, label, answer, step=None):
+        """Leave the history line of a prompt that was answered without asking (a command-line
+        flag, or --yes), so the screen reads the same as when it was asked."""
+        self._answered(label, answer, step)
 
     def _message(self, title, step):
         return f"{step[0]}/{step[1]}  {title}" if step else title
@@ -496,7 +553,7 @@ class UI:
         self._answered(label or title, result, step)
         return result
 
-    def checkboxes(self, title, options):
+    def checkboxes(self, title, options, checked=()):
         if self.plain:
             self.say(title, BLUE)
             for i, (text, _) in enumerate(options, 1):
@@ -514,7 +571,10 @@ class UI:
         picked = self._ask(
             questionary.checkbox(
                 title,
-                choices=[questionary.Choice(text, value=i) for i, (text, _) in enumerate(options)],
+                choices=[
+                    questionary.Choice(text, value=i, checked=value in checked)
+                    for i, (text, value) in enumerate(options)
+                ],
                 qmark=self.glyph["step"],
                 pointer=self.glyph["pointer"],
                 style=self.style,
@@ -539,6 +599,12 @@ class Session:
     def __init__(self, ui, total, items=None):
         self.ui = ui
         self.total = total
+        # One video has no batch to count: no item bar, no tally, and one line for status and time.
+        self.single = total == 1
+        self.now = time.monotonic
+        self.stream = "media"
+        self.beat = 0
+        self.beat_at = None
         self.done = 0
         self.saved = 0
         self.skipped = 0
@@ -630,6 +696,9 @@ class Session:
     def event(self, event):
         kind = event.get("type")
         if kind == "start":
+            self.stream = event.get("stream") or "media"
+            self.beat = 0
+            self.beat_at = self.now()
             self.current = event.get("name", "")
             self.downloaded = 0
             self.byte_total = None
@@ -652,6 +721,8 @@ class Session:
             self.smoother.update(self.downloaded, self.speed)
             self.file.update(self.fid, completed=self.downloaded, indicator=True)
             self.file.tasks[0].total = self.byte_total
+            if self.ui.plain:
+                self.heartbeat()
         elif kind == "file_done":
             self.downloaded = (
                 event.get("downloaded") or event.get("total") or self.byte_total or self.downloaded
@@ -685,6 +756,24 @@ class Session:
         ):
             self.ui.say(self.message, RED if kind == "failure" else None)
             self.last_plain = self.message
+
+    def heartbeat(self):
+        """Plain mode has no live bar, so a log would stay silent for the whole download. One
+        line is written for every tenth of the file (every minute while the size is unknown),
+        about ten lines per file at most, enough to see that it is alive and how fast."""
+        total, got = self.byte_total, self.downloaded
+        if total:
+            step = min(10, int(got * 10 // total))
+            if step < 1 or step <= self.beat:
+                return
+            self.beat = step
+            line = f"  {self.stream} {int(got * 100 // total)}% · {size(got)}/{size(total)}"
+        else:
+            if self.now() - (self.beat_at or 0) < 60:
+                return
+            line = f"  {self.stream} {size(got)}"
+        self.beat_at = self.now()
+        self.ui.say(line + f" · {size(self.speed)}/s")
 
     def item_end(self, status):
         self.clock.active(False)
@@ -793,26 +882,33 @@ class Session:
             f" · sisa {duration(self.until - time.time())}" if self.until else ""
         )
         stages = self.stages(options.max_width)
-        yield Group(
-            self.overall,
-            *self.window(options.max_height),
-            self.file,
-            *([stages] if stages else []),
+        elapsed = duration(time.monotonic() - self.started)
+        rows = [] if self.single else [self.overall]
+        rows += self.window(options.max_height)
+        rows += [self.file, *([stages] if stages else [])]
+        rows += [
             Text(self.current, style=BLUE, no_wrap=True, overflow="ellipsis"),
             Text(rate, style=BLUE, no_wrap=True, overflow="ellipsis"),
+        ]
+        if not self.single:
+            rows.append(
+                Text(
+                    f"Hasil  Disimpan {self.saved} · Dilewati {self.skipped} · Gagal {self.failed}",
+                    no_wrap=True,
+                    overflow="ellipsis",
+                )
+            )
+        rows.append(
             Text(
-                f"Hasil  Disimpan {self.saved} · Dilewati {self.skipped} · Gagal {self.failed}",
-                no_wrap=True,
-                overflow="ellipsis",
-            ),
-            Text(
-                "Status " + status,
+                "Status " + status + (f" · berjalan {elapsed}" if self.single else ""),
                 style=RED if "GAGAL" in status else DIM,
                 no_wrap=True,
                 overflow="ellipsis",
-            ),
-            Text("Durasi " + duration(time.monotonic() - self.started), style=DIM),
+            )
         )
+        if not self.single:
+            rows.append(Text("Durasi " + elapsed, style=DIM))
+        yield Group(*rows)
 
     def __exit__(self, exc_type, exc, tb):
         self.clock.active(False)
@@ -832,13 +928,15 @@ class Session:
         line = Text()
         if not self.ui.plain:
             line.append(self.ui.glyph[glyph] + " ", style=color)
+        elapsed = duration(time.monotonic() - self.started)
         line.append(
             label
-            + f" · {self.done}/{self.total} item · {duration(time.monotonic() - self.started)}",
+            + (f" · {elapsed}" if self.single else f" · {self.done}/{self.total} item · {elapsed}"),
             style=BLUE,
         )
         self.ui.say(line)
-        self.ui.say(
-            f"{'' if self.ui.plain else '  '}"
-            f"Disimpan {self.saved} · Dilewati {self.skipped} · Gagal {self.failed}"
-        )
+        if not self.single:
+            self.ui.say(
+                f"{'' if self.ui.plain else '  '}"
+                f"Disimpan {self.saved} · Dilewati {self.skipped} · Gagal {self.failed}"
+            )

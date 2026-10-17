@@ -12,11 +12,14 @@ class Terminal:
         env = {
             **os.environ,
             "TERM": "xterm-256color",
+            # A terminal that shows 24-bit color. A test of another depth overrides it in `extra`.
+            "COLORTERM": "truecolor",
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
             **(extra or {}),
         }
-        env.pop("NO_COLOR", None)
+        if "NO_COLOR" not in (extra or {}):
+            env.pop("NO_COLOR", None)
         if no_color:
             env["NO_COLOR"] = "1"
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")

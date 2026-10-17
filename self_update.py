@@ -16,7 +16,14 @@ import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
-from compat import file_lock, platform_key, ProcessTree, rotate_log, worker_start
+from compat import (
+    file_lock,
+    platform_key,
+    ProcessTree,
+    clean_environment,
+    rotate_log,
+    worker_start,
+)
 
 REPOSITORY = "fathorrosi-dev/youtube-downloader"
 API = "https://api.github.com/repos/" + REPOSITORY
@@ -226,7 +233,50 @@ def safe_unpack(archive, directory, version):
     return root
 
 
-def fetch_package(client, version, name, assets, temporary):
+def verify_attestation(archive, say=print, which=shutil.which, run=subprocess.run):
+    """Check that the package was built by this repository's release workflow (GitHub artifact
+    attestation), with the GitHub CLI.
+
+    The checksum next to the package only proves it arrived intact: whoever can change a release
+    can change both. An attestation ties the file to the workflow that built it. It is a
+    GitHub feature that a private repository may not have, so by default a missing or failing
+    check is reported and the update goes on; YTDL_VERIFY_ATTESTATION=1 makes it mandatory."""
+    strict = os.environ.get("YTDL_VERIFY_ATTESTATION") == "1"
+
+    def refuse(reason):
+        if strict:
+            raise ValueError(
+                "Attestation rilis wajib diperiksa (YTDL_VERIFY_ATTESTATION=1): "
+                + reason
+                + "; program belum diubah"
+            )
+        say("Attestation rilis tidak diperiksa: " + reason + "; checksum paket cocok.")
+        return False
+
+    gh = which("gh")
+    if not gh:
+        return refuse("GitHub CLI (gh) tidak ditemukan")
+    try:
+        result = run(
+            [gh, "attestation", "verify", str(archive), "--repo", REPOSITORY],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return refuse("gh tidak dapat dijalankan (" + str(exc) + ")")
+    if result.returncode:
+        lines = (result.stderr or result.stdout or "").strip().splitlines()
+        return refuse(
+            "verifikasi ditolak (" + (lines[-1].strip() if lines else "tanpa pesan") + ")"
+        )
+    say("Attestation rilis terverifikasi.")
+    return True
+
+
+def fetch_package(client, version, name, assets, temporary, verify=None):
     checksum = (
         client.read("/releases/assets/" + str(assets[1]["id"]), 4096, True).decode("utf-8").strip()
     )
@@ -238,6 +288,8 @@ def fetch_package(client, version, name, assets, temporary):
         raise ValueError("Checksum paket tidak cocok; program belum diubah")
     archive = Path(temporary) / name
     archive.write_bytes(data)
+    if verify:
+        verify(archive)
     return safe_unpack(archive, Path(temporary) / "package", version)
 
 
@@ -272,7 +324,7 @@ def install_package(source, root, wait=False, say=print):
                 stdin=subprocess.PIPE,
                 stdout=log,
                 stderr=log,
-                env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+                env=clean_environment({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}),
                 **(
                     {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
                     if os.name == "nt"
@@ -352,7 +404,14 @@ def perform(root, check=False, wait=False, say=print, activity=None):
         temporary = tempfile.TemporaryDirectory(prefix="release-", dir=root / ".state")
         try:
             with phase("Mengunduh dan memverifikasi paket " + version):
-                source = fetch_package(client, version, name, assets, temporary.name)
+                source = fetch_package(
+                    client,
+                    version,
+                    name,
+                    assets,
+                    temporary.name,
+                    lambda archive: verify_attestation(archive, say),
+                )
         except BaseException:
             temporary.cleanup()
             raise

@@ -3,9 +3,12 @@
 import hashlib
 import json
 import re
+from datetime import date
 from urllib.parse import urlparse, parse_qs
 
 VERSION = "1.3.0"
+# A yt-dlp release older than this many days is worth a hint when downloads fail.
+PIN_WARN_DAYS = 45
 MODES = ("video-audio", "audio", "video")
 
 
@@ -266,8 +269,12 @@ def basename(item):
 
 
 def item_indices(text, total):
-    if text in ("all", "semua", ""):
+    text = (text or "").strip()
+    if text.lower() in ("all", "semua"):
         return list(range(total))
+    if not text:
+        # An empty answer is an accident (a stray Enter), never "every item" of a long playlist.
+        raise SelectionError("Ketik nomor/rentang, misalnya 1,3,5-10, atau all untuk semua")
     result = set()
     for part in text.split(","):
         m = re.fullmatch(r"\s*(\d+)(?:\s*-\s*(\d+))?\s*", part)
@@ -279,6 +286,13 @@ def item_indices(text, total):
             raise SelectionError("Nomor item di luar daftar")
         result.update(range(first - 1, last))
     return sorted(result)
+
+
+def valid_browser(value):
+    """The cookie source: nothing, Firefox's default profile, or Firefox with a profile path."""
+    if not value or value == "firefox" or str(value).startswith("firefox:"):
+        return value
+    raise SelectionError("Pilihan browser hanya firefox atau firefox:/jalur/profil")
 
 
 def valid_url(url):
@@ -303,48 +317,82 @@ def valid_url(url):
     return url
 
 
+_AUTHENTICATION = (
+    "sign in",
+    "log in",
+    "authentication",
+    "confirm your age",
+    "not a bot",
+    "login required",
+)
+# Whole phrases only: a bare "not available" or "copyright" also matches errors that are not
+# about the video at all (for example "Requested format is not available").
+_UNAVAILABLE = (
+    "private video",
+    "video is private",
+    "video unavailable",
+    "video is unavailable",
+    "this video is not available",
+    "this video is no longer available",
+    "has been removed",
+    "deleted video",
+    "members-only",
+    "copyright grounds",
+    "copyright claim",
+    "available in your country",
+)
+_FORMAT = (
+    "requested format is not available",
+    "requested format not available",
+    "no video formats found",
+)
+_NETWORK = (
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "network is unreachable",
+    "temporary failure",
+    "name or service not known",
+    "getaddrinfo failed",
+    "remote end closed",
+    "bad gateway",
+    "service unavailable",
+)
+
+
+def _http(code, text):
+    """An HTTP status code as a status, not as digits inside an id or a version."""
+    return re.search(r"(?:http(?: error)?|status(?: code)?|error(?: code)?)\W{0,3}" + code, text)
+
+
 def classify(message):
+    """The kind of failure a message describes: it decides what the tool does and advises next.
+
+    authentication, rate_limit and unavailable stop or skip on their own; format, network and
+    system count toward the three-failures stop. An unrecognised message is "system"."""
     low = str(message).lower()
-    if any(
-        x in low
-        for x in (
-            "sign in",
-            "log in",
-            "authentication",
-            "confirm your age",
-            "not a bot",
-            "login required",
-        )
-    ):
+    if any(x in low for x in _AUTHENTICATION):
         return "authentication"
-    if any(
-        x in low
-        for x in (
-            "private video",
-            "video is private",
-            "video unavailable",
-            "video is unavailable",
-            "has been removed",
-            "not available",
-            "deleted video",
-            "copyright",
-            "members-only",
-        )
-    ):
+    if any(x in low for x in _UNAVAILABLE):
         return "unavailable"
-    if "429" in low or "too many requests" in low:
+    if any(x in low for x in _FORMAT):
+        return "format"
+    if _http("429", low) or "too many requests" in low:
         return "rate_limit"
-    if any(
-        x in low
-        for x in (
-            "timed out",
-            "timeout",
-            "connection",
-            "network",
-            "temporary failure",
-            "503",
-            "502",
-        )
-    ):
+    if any(x in low for x in _NETWORK) or _http("50[234]", low):
         return "network"
     return "system"
+
+
+def release_age_days(version, today=None):
+    """Days since a date-versioned release (yt-dlp uses YYYY.M.D); None if it is not one."""
+    m = re.match(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", str(version))
+    if not m:
+        return None
+    try:
+        released = date(int(m[1]), int(m[2]), int(m[3]))
+    except ValueError:
+        return None
+    return max(0, ((today or date.today()) - released).days)

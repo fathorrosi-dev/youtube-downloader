@@ -98,7 +98,10 @@ class SelfUpdate(unittest.TestCase):
         with (
             patch.object(update, "github_token", return_value="test-credential"),
             patch.object(update, "GitHub", return_value=self.client),
+            # Never the real GitHub CLI from a test: verification has its own tests below.
+            patch.object(update, "verify_attestation", return_value=False) as verify,
         ):
+            self.verify = verify
             return update.perform(self.dest, say=lambda msg: None, **kw)
 
     def test_check_is_read_only(self):
@@ -125,6 +128,99 @@ class SelfUpdate(unittest.TestCase):
             (self.dest / "settings.json").read_text(encoding="utf-8"), '{"private":true}'
         )
         self.assertEqual(list((self.dest / ".state").glob("release-*")), [])
+
+    def test_the_package_is_verified_before_anything_is_unpacked_or_installed(self):
+        def install(source, root, *args):
+            shutil.copy2(source / "model.py", root / "model.py")
+            return 0
+
+        with patch.object(update, "install_package", side_effect=install) as installer:
+            self.assertEqual(self.perform(), 0)
+        self.verify.assert_called_once()
+        self.assertEqual(Path(self.verify.call_args.args[0]).name, self.archive.name)
+        installer.assert_called_once()
+        (self.dest / "model.py").write_text("VERSION='1.1.0'\n", encoding="utf-8")
+        # A verification that refuses stops the update with the program untouched.
+        with (
+            patch.object(update, "github_token", return_value="test-credential"),
+            patch.object(update, "GitHub", return_value=self.client),
+            patch.object(update, "verify_attestation", side_effect=ValueError("ditolak")),
+            patch.object(update, "install_package") as install,
+        ):
+            with self.assertRaisesRegex(ValueError, "ditolak"):
+                update.perform(self.dest, say=lambda msg: None)
+            install.assert_not_called()
+        self.assertEqual((self.dest / "app.py").read_text(encoding="utf-8"), "old program")
+
+    def verify_with(self, which=None, run=None, strict=False):
+        said = []
+        env = {"YTDL_VERIFY_ATTESTATION": "1"} if strict else {}
+        with patch.dict(os.environ, env, clear=False):
+            if not strict:
+                os.environ.pop("YTDL_VERIFY_ATTESTATION", None)
+            result = update.verify_attestation(
+                self.archive, said.append, which or (lambda name: None), run
+            )
+        return result, said
+
+    def test_attestation_is_reported_but_not_required_by_default(self):
+        result, said = self.verify_with()  # no GitHub CLI
+        self.assertFalse(result)
+        self.assertRegex(said[0], "tidak diperiksa.*gh.*tidak ditemukan.*checksum paket cocok")
+
+        class Done:
+            returncode = 1
+            stdout = ""
+            stderr = "first line\nno attestations found\n"
+
+        result, said = self.verify_with(lambda name: "/usr/bin/gh", lambda *a, **k: Done())
+        self.assertFalse(result)
+        self.assertRegex(said[0], r"verifikasi ditolak \(no attestations found\)")
+
+        def broken(*args, **kwargs):
+            raise OSError("exec failed")
+
+        result, said = self.verify_with(lambda name: "/usr/bin/gh", broken)
+        self.assertFalse(result)
+        self.assertIn("gh tidak dapat dijalankan", said[0])
+
+    def test_attestation_passes_the_archive_and_repository_to_the_cli(self):
+        seen = {}
+
+        class Ok:
+            returncode = 0
+            stdout = stderr = ""
+
+        def run(command, **kwargs):
+            seen["command"], seen["timeout"] = command, kwargs["timeout"]
+            return Ok()
+
+        result, said = self.verify_with(lambda name: "/usr/bin/gh", run)
+        self.assertTrue(result)
+        self.assertEqual(
+            seen["command"],
+            [
+                "/usr/bin/gh",
+                "attestation",
+                "verify",
+                str(self.archive),
+                "--repo",
+                update.REPOSITORY,
+            ],
+        )
+        self.assertLessEqual(seen["timeout"], 60)
+        self.assertEqual(said, ["Attestation rilis terverifikasi."])
+
+    def test_attestation_can_be_made_mandatory(self):
+        class Refused:
+            returncode = 1
+            stdout = ""
+            stderr = "attestation does not match"
+
+        with self.assertRaisesRegex(ValueError, "wajib diperiksa.*gh.*tidak ditemukan"):
+            self.verify_with(strict=True)
+        with self.assertRaisesRegex(ValueError, "wajib diperiksa.*does not match.*belum diubah"):
+            self.verify_with(lambda name: "/usr/bin/gh", lambda *a, **k: Refused(), strict=True)
 
     def test_shared_download_lock_refuses_installation(self):
         with (

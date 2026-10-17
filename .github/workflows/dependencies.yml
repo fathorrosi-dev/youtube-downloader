@@ -1,0 +1,69 @@
+name: Dependency health
+
+# Weekly check of what compatibility.yml never looks at: whether the hash-locked packages
+# still match PyPI, whether any of them has a known vulnerability, and how old the yt-dlp pin is.
+# It runs only in CI and adds nothing to the tool. A problem opens (or updates) one issue.
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: Lock, vulnerabilities and yt-dlp age
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Lock hashes match PyPI
+        id: lock
+        continue-on-error: true
+        run: python scripts/lock_hashes.py --check 2>&1 | tee lock.txt; test "${PIPESTATUS[0]}" -eq 0
+      - name: Known vulnerabilities in the locked packages
+        id: audit
+        continue-on-error: true
+        run: |
+          python -m pip install --quiet pip-audit==2.9.0
+          python -m pip_audit --requirement requirements.lock --no-deps --disable-pip 2>&1 | tee audit.txt
+          test "${PIPESTATUS[0]}" -eq 0
+      - name: Age of the yt-dlp pin
+        id: age
+        continue-on-error: true
+        run: |
+          python - <<'PY' 2>&1 | tee age.txt
+          import re, sys
+          from model import PIN_WARN_DAYS, release_age_days
+          pin = re.search(r"yt-dlp\[default\]==([0-9.]+)", open("requirements.txt").read())[1]
+          age = release_age_days(pin)
+          print(f"yt-dlp {pin} was released {age} days ago (warning after {PIN_WARN_DAYS})")
+          sys.exit(1 if age is not None and age > PIN_WARN_DAYS else 0)
+          PY
+      - name: Open an issue when something needs attention
+        if: steps.lock.outcome == 'failure' || steps.audit.outcome == 'failure' || steps.age.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          title="Dependency health: action needed"
+          {
+            echo "The weekly dependency check found something. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            for part in lock audit age; do
+              if [ -s "$part.txt" ]; then echo; echo "### $part"; echo '```'; tail -n 40 "$part.txt"; echo '```'; fi
+            done
+          } > body.md
+          existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi

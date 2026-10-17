@@ -100,6 +100,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -114,6 +116,14 @@ jobs:
           python -c "import os,json; from model import VERSION; assert os.environ['RELEASE_TAG']=='v'+VERSION; assert json.load(open('release.json'))['version']==VERSION"
       - name: Build program-only package
         run: python release_bundle.py dist
+      - name: Attest package provenance
+        # Ties the package to this workflow, so `update` can prove where it came from. Private
+        # repositories need a GitHub plan that offers attestations: where it is not offered this
+        # step fails and the release still goes out, as before.
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.zip
       - name: Publish package and checksum
         env:
           GH_TOKEN: ${{ github.token }}

@@ -19,6 +19,8 @@ class FixtureIE(InfoExtractor):
 
     def _real_extract(self, url):
         identifier = self._match_id(url)
+        with (ROOT / "extractions.log").open("a", encoding="utf-8") as log:
+            log.write(identifier + "\n")
         if identifier == "crash":
             os._exit(0)
         if identifier == "auth":
