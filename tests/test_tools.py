@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
+import testenv  # noqa: F401
 import model
 import store
 import runner
@@ -745,8 +746,11 @@ class Display(unittest.TestCase):
 
     def test_tty_plain_no_color_and_interrupt(self):
         out = self.tty()
-        for rgb in ("168;216;240", "255;194;212", "232;56;79"):
+        # Sky blue and pink carry the preview; the dark red of a failure is not in it (nothing
+        # fails), and the active bar is no longer red.
+        for rgb in ("168;216;240", "255;194;212"):
             self.assertIn("\x1b[38;2;" + rgb + "m", out)
+        self.assertNotIn("\x1b[38;2;255;84;112m", out)
         self.assertRegex(out, r"\x1b\[[1-9][0-9]*A")
         self.assertIn("\x1b[?25h", out)
         out = self.tty(no_color=True)
@@ -882,14 +886,23 @@ class Display(unittest.TestCase):
 
     def test_every_live_display_redraws_at_the_shared_rate(self):
         screen, _ = rich_ui()
-        with patch.object(ui, "Live") as live:
-            with ui.Session(screen, 1):
+        screen.motion = True
+        with patch.object(ui, "Live") as live, patch.object(ui.time, "sleep"):
+            with ui.Session(screen, 1):  # the panel, then the flourish of a clean finish
                 pass
             with screen.activity("x"):
                 pass
         rates = [call.kwargs["refresh_per_second"] for call in live.call_args_list]
-        self.assertEqual(rates, [ui.FPS, ui.FPS])
+        self.assertEqual(rates, [ui.FPS, ui.FPS, ui.FPS])
         self.assertGreaterEqual(ui.FPS, 12)
+
+    def test_a_still_activity_does_not_redraw_at_the_animation_rate(self):
+        screen, _ = rich_ui()
+        screen.motion = False
+        with patch.object(ui, "Live") as live:
+            with screen.activity("x"):
+                pass
+        self.assertLess(live.call_args.kwargs["refresh_per_second"], ui.FPS)
 
 
 def panel(session, width=100, height=30):
@@ -1295,7 +1308,10 @@ class Presentation(unittest.TestCase):
         self.assertTrue(build(True, TERM="dumb").plain)
         self.assertFalse(build(True, NO_COLOR="").no_color)  # empty means not set
         self.assertTrue(build(True, NO_COLOR="1").no_color)
-        self.assertIsNone(build(True).depth)  # detected, not forced to 24 bits
+        # One decision for Rich and prompt_toolkit, taken from the terminal and not forced to 24 bits.
+        self.assertIs(build(True).depth, ui.ColorDepth.DEPTH_8_BIT)
+        self.assertIs(build(True, COLORTERM="truecolor").depth, ui.ColorDepth.DEPTH_24_BIT)
+        self.assertIs(build(True, TERM="xterm").depth, ui.ColorDepth.DEPTH_4_BIT)
         self.assertIs(build(True, NO_COLOR="1").depth, ui.ColorDepth.DEPTH_1_BIT)
         self.assertEqual(build(True, COLORTERM="truecolor").console.color_system, "truecolor")
         self.assertEqual(build(True).console.color_system, "256")

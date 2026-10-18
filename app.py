@@ -1,6 +1,7 @@
 """Interactive YouTube downloader entry point."""
 
 import argparse
+import json
 import os
 import shlex
 import sqlite3
@@ -9,6 +10,7 @@ import time
 import platform
 import subprocess
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime
 from compat import (
@@ -131,7 +133,7 @@ def stop_message(category):
     text = "Tiga kegagalan berurutan; periksa log."
     age = ytdlp_age()
     if age is not None and age > PIN_WARN_DAYS:
-        text += f" yt-dlp rilis {age} hari lalu; coba jalankan update."
+        text += f" yt-dlp rilis {age} hari lalu; periksa rilis alat baru dengan update --check."
     return text + " Lalu lanjutkan:"
 
 
@@ -277,37 +279,101 @@ def pick_entries(ui, initial, preset):
     return selected
 
 
+INSPECT_WORKERS = 3
+
+
+def inspect_workers(count):
+    """How many items are looked up at once. YTDL_INSPECT_WORKERS=1 turns it back into one at a
+    time; a few at once keeps a long playlist from waiting minutes for its first menu."""
+    try:
+        wanted = int(os.environ.get("YTDL_INSPECT_WORKERS", INSPECT_WORKERS))
+    except ValueError:
+        wanted = INSPECT_WORKERS
+    return max(1, min(wanted, count))
+
+
 def inspect_selection(ui, selected, browser):
     """The metadata of every selected playlist item. One that is unavailable is listed and
-    skipped; a login request, a rate limit or three failures in a row stop the whole batch."""
+    skipped; a login request, a rate limit or three failures in a row stop the whole batch.
+
+    A few items are looked up at the same time, but their results are taken in playlist order,
+    so what is listed, skipped or counted as a failure is the same as one at a time. When the
+    batch stops, the lookups that have not started are dropped."""
     metadata = []
     unavailable = []
     errors = 0
     total = len(selected)
     label = "Memeriksa kualitas dan subtitle"
-    with ui.activity(f"{label} · 0/{total}") as progress:
-        for number, entry in enumerate(selected, 1):
-            if progress:
-                progress(f"{label} · {number}/{total}")
-            try:
-                info = inspect_url(entry["url"], browser)
-                metadata.append(info)
-                errors = 0
-            except WorkerError as exc:
-                unavailable.append({"title": entry["title"], "reason": str(exc)})
-                if exc.category in ("authentication", "rate_limit"):
-                    raise
-                if exc.category not in ("unavailable",):
-                    errors += 1
-                if errors >= 3:
-                    raise WorkerError(
-                        "Tiga kegagalan metadata berurutan; batch dihentikan. " + str(exc),
-                        exc.category,
-                    ) from exc
+    workers = inspect_workers(total)
+    pool = ThreadPoolExecutor(workers) if workers > 1 else nullcontext()
+    with ui.activity(f"{label} · 0/{total}") as progress, pool:
+        if workers > 1:
+            futures = [pool.submit(inspect_url, entry["url"], browser) for entry in selected]
+            fetch = lambda index: futures[index].result()  # noqa: E731
+        else:
+            futures = []
+            fetch = lambda index: inspect_url(selected[index]["url"], browser)  # noqa: E731
+        try:
+            for index, entry in enumerate(selected):
+                number = index + 1
+                try:
+                    info = fetch(index)
+                    metadata.append(info)
+                    errors = 0
+                except WorkerError as exc:
+                    unavailable.append({"title": entry["title"], "reason": str(exc)})
+                    if exc.category in ("authentication", "rate_limit"):
+                        raise
+                    if exc.category not in ("unavailable",):
+                        errors += 1
+                    if errors >= 3:
+                        raise WorkerError(
+                            "Tiga kegagalan metadata berurutan; batch dihentikan. " + str(exc),
+                            exc.category,
+                        ) from exc
+                if progress:
+                    progress(f"{label} · {number}/{total}", (number, total))
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
     if unavailable:
         ui.table(
             ("Item tidak tersedia", "Alasan"), [(x["title"], x["reason"]) for x in unavailable]
         )
+    return metadata
+
+
+def read_links(path):
+    """The links of a --links-file: one per line, blank lines and lines starting with # skipped."""
+    try:
+        lines = Path(path).expanduser().read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"--links-file tidak dapat dibaca: {exc}") from exc
+    links = []
+    for number, line in enumerate(lines, 1):
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        try:
+            links.append(valid_url(text))
+        except ValueError as exc:
+            raise ValueError(f"--links-file baris {number}: {exc}") from exc
+    if not links:
+        raise ValueError("--links-file tidak berisi link")
+    return links
+
+
+def collect_many(ui, urls, browser, preset):
+    """The metadata of several links as one batch; a video that appears twice is taken once."""
+    metadata, seen = [], set()
+    for url in urls:
+        for info in collect_metadata(ui, url, browser, choose_source(ui, url, preset), preset):
+            if info["id"] not in seen:
+                seen.add(info["id"])
+                metadata.append(info)
+    if not metadata:
+        raise ValueError("Tidak ada item yang dapat diunduh")
     return metadata
 
 
@@ -710,10 +776,13 @@ def wizard(ui, url, browser=None, output=None, preset=None):
     The answers come from the menus, from command-line flags (`preset`), or from --yes."""
     preset = {} if preset is None else preset
     preset["_used"] = set()
-    url = valid_url(url or ui.text("Tempel link YouTube:", label="Link"))
     root = str(native_output(output or settings()["output"]))
-    is_playlist = choose_source(ui, url, preset)
-    metadata = collect_metadata(ui, url, browser, is_playlist, preset)
+    if isinstance(url, list):  # the links of a --links-file
+        metadata = collect_many(ui, url, browser, preset)
+    else:
+        url = valid_url(url or ui.text("Tempel link YouTube:", label="Link"))
+        is_playlist = choose_source(ui, url, preset)
+        metadata = collect_metadata(ui, url, browser, is_playlist, preset)
     describe_single(ui, metadata)
     ui.say("")
     all_tracks = merge_tracks(metadata)
@@ -729,6 +798,9 @@ def wizard(ui, url, browser=None, output=None, preset=None):
         decision = confirm(ui, preset, answers["steps"])
         if decision == "edit":
             ui.say(Text("Mengubah pilihan · info video tidak diambil ulang", style=DIM))
+            # An answer that came from a flag is asked again too, with it selected as the default.
+            for key in FLAGS:
+                preset.pop(key, None)
             continue
         if decision is False:
             raise Cancelled()
@@ -854,40 +926,65 @@ def pin_note(name, actual):
         return ""
     note = f" · rilis {age} hari lalu"
     if age > PIN_WARN_DAYS:
-        note += " · sudah lama; jika unduhan gagal, jalankan update"
+        note += f" · sudah lama (> {PIN_WARN_DAYS} hari); cek rilis alat baru: update --check"
     return note
 
 
-def state_note():
-    note = str(STATE)
+def state_figures():
+    """(bytes in .state, bytes that `clean` could free), or None when .state cannot be read."""
     try:
         import maintenance
 
-        note += " · " + size(folder_size(STATE))
         reclaim = sum(
             w for entries in maintenance.clean_plan(STATE.parent).values() for _, w in entries
         )
-        if reclaim:
-            note += f" · {size(reclaim)} dapat dibersihkan (jalankan clean)"
+        return folder_size(STATE), reclaim
     except OSError:
-        pass
+        return None
+
+
+def state_note(figures=UNSET):
+    note = str(STATE)
+    figures = state_figures() if figures is UNSET else figures
+    if figures:
+        note += " · " + size(figures[0])
+        if figures[1]:
+            note += f" · {size(figures[1])} dapat dibersihkan (jalankan clean)"
     return note
 
 
-def status(ui):
+def status(ui, as_json=False):
+    """The state of this installation as a table on stderr, or with --json as one JSON object on
+    stdout (the table is not drawn) for a script to read."""
+    figures = state_figures()
+    data = {
+        "version": VERSION,
+        "platform": platform_key(),
+        "python": {"version": platform.python_version(), "executable": sys.executable},
+        "tools": str(BASE),
+        "media": str(Path(settings()["output"]).expanduser()),
+        "state": {
+            "path": str(STATE),
+            "bytes": figures[0] if figures else None,
+            "reclaimable_bytes": figures[1] if figures else None,
+        },
+        "dependencies": [],
+        "binaries": {},
+    }
     rows = [
         ("Versi", VERSION),
         ("Platform", platform_key()),
         ("Python", platform.python_version() + " · " + sys.executable),
         ("Tools", str(BASE)),
-        ("Media", str(Path(settings()["output"]).expanduser())),
-        ("Catatan", state_note()),
+        ("Media", data["media"]),
+        ("Catatan", state_note(figures)),
     ]
     try:
         from packaging.requirements import Requirement
     except ImportError:
         Requirement = None
         rows.append(("packaging", "belum terpasang · jalankan setup"))
+    data["packaging_installed"] = Requirement is not None
     pins = lock_requirements((BASE / "requirements.lock").read_text(encoding="utf-8"))
     for line in pins if Requirement else []:
         dependency = Requirement(line)
@@ -897,6 +994,9 @@ def status(ui):
             actual = version(dependency.name)
         except PackageNotFoundError:
             rows.append((dependency.name, "belum terpasang"))
+            data["dependencies"].append(
+                {"name": dependency.name, "pin": str(dependency.specifier), "installed": None}
+            )
             continue
         mismatch = " · TIDAK SESUAI " + str(dependency.specifier)
         rows.append(
@@ -906,6 +1006,17 @@ def status(ui):
                 + ("" if actual in dependency.specifier else mismatch)
                 + pin_note(dependency.name, actual),
             )
+        )
+        data["dependencies"].append(
+            {
+                "name": dependency.name,
+                "pin": str(dependency.specifier),
+                "installed": actual,
+                "matches_pin": actual in dependency.specifier,
+                "release_age_days": (
+                    release_age_days(actual) if dependency.name.lower() == "yt-dlp" else None
+                ),
+            }
         )
     for name in ("ffmpeg", "ffprobe", "deno"):
         binary = str(deno_path(BASE)) if name == "deno" else shutil.which(name)
@@ -918,13 +1029,22 @@ def status(ui):
                 errors="replace",
                 timeout=10,
             )
-            rows.append(
-                (name, (r.stdout.splitlines() or ["tidak tersedia"])[0] + " · " + str(binary))
-            )
+            first = (r.stdout.splitlines() or ["tidak tersedia"])[0]
+            rows.append((name, first + " · " + str(binary)))
+            data["binaries"][name] = {"available": True, "version": first, "path": str(binary)}
         except (OSError, TypeError, subprocess.TimeoutExpired):
             rows.append((name, "tidak tersedia · jalankan setup --check"))
-    ui.table(("Informasi", "Nilai"), rows)
+            data["binaries"][name] = {"available": False}
     jobs, unreadable = list_jobs()
+    data["jobs"] = [
+        {"id": j.get("id"), "status": j.get("status"), "items": len(j.get("items") or [])}
+        for j in jobs[:10]
+    ]
+    data["unreadable_jobs"] = [{"file": name, "reason": reason} for name, reason in unreadable]
+    if as_json:
+        print(json.dumps(data, ensure_ascii=False, indent=2), flush=True)
+        return
+    ui.table(("Informasi", "Nilai"), rows)
     table = [(j.get("id", "?"), j.get("status", "?"), len(j.get("items") or [])) for j in jobs[:10]]
     table += [(name, "tidak terbaca", "-") for name, _ in unreadable]
     if table:
@@ -968,8 +1088,25 @@ def choose_job(ui, args):
 def clean_command(ui, args):
     import maintenance
 
+    abandoned = getattr(args, "abandoned", False)
+    if abandoned:
+        jobs = maintenance.abandoned_jobs(BASE, args.days)
+        if jobs:
+            ui.table(
+                ("Job ditinggalkan", "Status", "Umur", "Ukuran"),
+                [
+                    (job_id, status, f"{age} hari", size(sum(w for _, w in entries)))
+                    for job_id, status, age, entries in jobs
+                ],
+            )
+            ui.say(
+                Text(
+                    "Jobnya tetap tersimpan; resume mengunduh ulang dari awal tanpa folder ini.",
+                    style=DIM,
+                )
+            )
     with lock() if args.apply else nullcontext():
-        rows = maintenance.clean(BASE, args.apply, args.days)
+        rows = maintenance.clean(BASE, args.apply, args.days, abandoned)
     if not rows:
         ui.say("Tidak ada yang perlu dibersihkan.")
         return 0
@@ -1031,6 +1168,11 @@ def preview(ui):
             time.sleep(0.035)
         session.event({"type": "file_done"})
 
+    if not ui.plain:
+        with ui.activity("Mengambil informasi YouTube · simulasi") as progress:
+            for step in range(1, 4):
+                time.sleep(0.25 if ui.motion else 0)
+                progress(f"Memeriksa kualitas dan subtitle · {step}/3", (step, 3))
     with Session(ui, len(items), items) as session:
         time.sleep(0.3)
         session.item_end("skipped")
@@ -1068,8 +1210,11 @@ EPILOG = """contoh:
   youtube-downloader LINK --yes --quality 1080 --subs en
                                            tanpa menu; path hasil dicetak ke stdout
   youtube-downloader resume                pilih job yang dilanjutkan (resume --last: yang terbaru)
-  youtube-downloader status                versi, dependensi, umur yt-dlp, job, ukuran .state
-  youtube-downloader clean [--apply]       lihat atau hapus sisa di .state
+  youtube-downloader --links-file link.txt --yes
+                                           satu job untuk banyak link (satu per baris)
+  youtube-downloader status [--json]       versi, dependensi, umur yt-dlp, job, ukuran .state
+  youtube-downloader clean [--apply] [--abandoned]
+                                           lihat atau hapus sisa di .state
   youtube-downloader update [--check]      periksa atau pasang rilis stabil
   youtube-downloader rebase-media --from LAMA --to BARU [--dry-run]
 
@@ -1101,6 +1246,14 @@ def build_parser():
     )
     parser.add_argument("--apply", action="store_true", help="Clean: hapus, bukan hanya daftar")
     parser.add_argument("--days", type=int, default=30, help="Clean: umur cadangan media (hari)")
+    parser.add_argument(
+        "--abandoned",
+        action="store_true",
+        help="Clean: juga folder sementara job yang belum selesai dan lebih tua dari --days",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="Status: satu objek JSON di stdout, tanpa tabel"
+    )
     parser.add_argument("--from", dest="old_root", help="Rebase-media: akar media lama")
     parser.add_argument("--to", dest="new_root", help="Rebase-media: akar media baru")
     parser.add_argument("--dry-run", action="store_true", help="Rebase-media: tanpa mengubah")
@@ -1119,6 +1272,11 @@ def build_parser():
     )
     scripting.add_argument(
         "--yes", action="store_true", help="Mulai tanpa bertanya; tanpa terminal"
+    )
+    scripting.add_argument(
+        "--links-file",
+        help="Berkas berisi satu link per baris (# = komentar); satu job untuk semuanya, "
+        "hanya bersama --yes",
     )
     return parser
 
@@ -1167,8 +1325,12 @@ def main(argv=None):
             )
         if args.check or args.wait:
             raise ValueError("--check/--wait hanya digunakan dengan update")
+        if args.json and args.action != "status":
+            raise ValueError("--json hanya digunakan dengan status")
+        if args.abandoned and args.action != "clean":
+            raise ValueError("--abandoned hanya digunakan dengan clean")
         preset = scripted_preset(args)
-        if args.action in COMMANDS and preset:
+        if args.action in COMMANDS and (preset or args.links_file):
             raise ValueError("Flag tanpa menu hanya untuk membuat job dari link")
         if args.action in SCRIPT_COMMANDS:
             ext = "cmd" if os.name == "nt" else "sh"
@@ -1180,13 +1342,22 @@ def main(argv=None):
             preview(ui)
             return 0
         if args.action == "status":
-            status(ui)
+            status(ui, args.json)
             return 0
         if args.action == "clean":
             return clean_command(ui, args)
         if args.action == "rebase-media":
             return rebase_command(args)
-        ui.banner(VERSION)
+        source = args.action
+        if args.links_file:
+            if args.action or args.job:
+                raise ValueError("--links-file menggantikan link; jangan beri link lagi")
+            if not args.yes:
+                raise ValueError("--links-file hanya bersama --yes (dengan flag pilihan)")
+            if args.items or args.playlist:
+                raise ValueError("--items dan --playlist tidak berlaku bersama --links-file")
+            source = read_links(args.links_file)
+        ui.banner(VERSION, animate=not preset.get("yes") and sys.stdin.isatty())
         ui.say("")
         if args.browser:
             valid_browser(args.browser)
@@ -1207,7 +1378,7 @@ def main(argv=None):
                         "berjalan tanpa terminal, atau resume ID_JOB untuk job yang sudah tersimpan."
                     )
                 job = wizard(
-                    ui, args.action, args.browser or settings().get("browser"), args.output, preset
+                    ui, source, args.browser or settings().get("browser"), args.output, preset
                 )
             try:
                 execute(ui, job)

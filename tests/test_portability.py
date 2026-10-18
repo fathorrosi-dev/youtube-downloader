@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
+import testenv  # noqa: F401
 import compat
 import maintenance
 import runner

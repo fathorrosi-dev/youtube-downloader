@@ -10,3 +10,5 @@ media/
 *.part
 *.zip
 .DS_Store
+dist/
+*.zip.sha256

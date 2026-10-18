@@ -188,11 +188,29 @@ def inspect(request, events):
 
 def ffmpeg(args, events, stage, phase="finish"):
     events.send("stage", message=stage, phase=phase)
-    subprocess.run(
-        ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", *args],
-        check=True,
-        stdout=sys.stderr,
-    )
+    try:
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", *args],
+            check=True,
+            stdout=sys.stderr,
+        )
+    except subprocess.CalledProcessError as exc:
+        # The command line (with every temporary path) and FFmpeg's own message are in the log;
+        # the person sees one sentence.
+        raise ValueError(
+            f"FFmpeg gagal (kode {exc.returncode}) saat {stage[:1].lower() + stage[1:]}; "
+            "detail di .state/download.log"
+        ) from exc
+
+
+WINDOWS_PATH_LIMIT = 259
+
+
+def path_too_long(path, windows=None, limit=WINDOWS_PATH_LIMIT):
+    """The length of `path` when Windows would refuse it (260 characters with the terminator
+    unless long paths are on, and FFmpeg does not rely on them), otherwise None."""
+    windows = os.name == "nt" if windows is None else windows
+    return len(str(path)) if windows and len(str(path)) > limit else None
 
 
 def subtitle_path(root, prefix, track):
@@ -339,6 +357,20 @@ def download_stream(opts, info, url):
         return ydl.prepare_filename(downloaded)
 
 
+def remove_temporary(folder):
+    """Remove the temporary folder of a download whose file is already in place. Something that
+    still holds it open (a virus scanner or an indexer on Windows) is not a failed download:
+    the folder is left, said once, and `clean` removes it later."""
+    try:
+        shutil.rmtree(folder, ignore_errors=True)
+    except OSError:
+        pass
+    if Path(folder).exists():
+        print(f"Folder sementara tidak terhapus: {folder} (jalankan clean)", file=sys.stderr)
+        return False
+    return True
+
+
 def download(request, events):
     item = request["item"]
     choice = item["choice"]
@@ -348,6 +380,12 @@ def download(request, events):
     mode = choice["mode"]
     extension = container(choice, item.get("subtitles"))
     target = root / ("audio" if mode == "audio" else "video") / (prefix + "." + extension)
+    longest = path_too_long(target.with_name("." + target.stem + ".assembling." + extension))
+    if longest:
+        raise ValueError(
+            f"Path file sementara {longest} karakter, melewati batas Windows (260). "
+            "Pilih folder tujuan yang lebih pendek dengan --output."
+        )
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_root = BASE / ".state/temporary" / variant(item)
     existing = request.get("existing_file")
@@ -358,7 +396,7 @@ def download(request, events):
                 "Benturan hasil: file sudah ada tanpa catatan arsip dan tidak lolos "
                 "pemeriksaan; tidak ditimpa"
             )
-        shutil.rmtree(temp_root, ignore_errors=True)
+        remove_temporary(temp_root)
         return adopted
     temp_root.mkdir(parents=True, exist_ok=True)
     events.send("stage", message="Memeriksa format dan akses terbaru", phase="metadata")
@@ -472,7 +510,9 @@ def download(request, events):
         temp.replace(target)
     finally:
         temp.unlink(missing_ok=True)
-    shutil.rmtree(temp_root)
+    # The file is already in place. A temporary folder that something still holds open (a virus
+    # scanner or an indexer on Windows) is not a failed download: `clean` removes it later.
+    remove_temporary(temp_root)
     events.send("stage", message="Hasil akhir tersimpan")
     return {"path": str(target), "mode": mode, "subtitles": subtitles, "missing": missing}
 

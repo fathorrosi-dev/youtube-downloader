@@ -4,7 +4,7 @@ Tools terpisah dari X Bookmarks untuk video YouTube, Shorts, dan playlist. Rekom
 
 ## Pemasangan tiap OS
 
-Python standar **3.10–3.14** didukung; gunakan **3.13** untuk pemasangan baru. Python free-threaded tidak termasuk dukungan. Target: Ubuntu 24.04+ x64, Windows 11 x64 native, macOS 15+ Intel/Apple Silicon. Linux ARM64 memiliki aset runtime tetapi belum diverifikasi. Windows ARM64, GUI, dan executable tanpa Python belum tersedia.
+Python standar **3.11–3.14** didukung; gunakan **3.13** untuk pemasangan baru. Python 3.10 sudah berakhir masa dukungnya (1 Oktober 2026) dan tidak lagi didukung. Python free-threaded tidak termasuk dukungan. Target: Ubuntu 24.04+ x64, Windows 11 x64 native, macOS 15+ Intel/Apple Silicon. Linux ARM64 memiliki aset runtime tetapi belum diverifikasi. Windows ARM64, GUI, dan executable tanpa Python belum tersedia.
 
 Ambil paket rilis atau clone repo privat `fathorrosi-dev/youtube-downloader` dengan akun yang diberi akses. Ekstrak seluruh paket ke folder tools; jangan hanya menyalin launcher. Folder boleh mengandung spasi dan Unicode. Setup membutuhkan internet untuk dependensi Python dan runtime Deno.
 
@@ -76,18 +76,27 @@ Panah atas/bawah memilih, Enter mengonfirmasi, Space mencentang subtitle/item pl
 ./youtube-downloader --plain 'https://www.youtube.com/shorts/ID_VIDEO'
 ```
 
-Wizard memerlukan terminal untuk menjawab menu, kecuali semua jawabannya diberikan lewat flag dan `--yes` (bagian *Tanpa menu*). Seluruh tampilan ditulis ke **stderr**, jadi stderr yang menentukan bentuknya: plain bila stderr bukan terminal, `TERM=dumb`, atau `--plain`. Mengalihkan atau menangkap **stdout** tidak mengubah tampilan; stdout hanya berisi path hasil. Kedalaman warna mengikuti terminal (`COLORTERM`/`TERM`; turun otomatis ke 256 atau 16 warna). Job tersimpan bisa di-resume tanpa menu.
+Wizard memerlukan terminal untuk menjawab menu, kecuali semua jawabannya diberikan lewat flag dan `--yes` (bagian *Tanpa menu*). Seluruh tampilan ditulis ke **stderr**, jadi stderr yang menentukan bentuknya: plain bila stderr bukan terminal, `TERM=dumb`, atau `--plain`. Mengalihkan atau menangkap **stdout** tidak mengubah panel dan warna; stdout hanya berisi path hasil. Satu pengecualian di Windows: menu panah (prompt_toolkit) menggambar lewat konsol stdout, jadi bila stdout dialihkan menu tampil sebagai pilihan bernomor (ketik angkanya), sementara panel dan warna tetap. Ctrl+D (akhir input) pada pertanyaan sama dengan membatalkan: keluar 130 tanpa pesan galat. Job tersimpan bisa di-resume tanpa menu.
+
+**Warna dan gerak.** Kedalaman warna mengikuti terminal: di Linux dan macOS dari `COLORTERM` (`truecolor`/`24bit`) dan `TERM`, di Windows dari konsolnya (24-bit pada Windows 10 build 15063 ke atas), lalu turun otomatis ke 256 atau 16 warna. Tiga warna membawa tampilan: pink untuk pilihan Anda dan keberhasilan, sky blue untuk proses yang sedang berjalan, merah hanya untuk kegagalan. Ada dua set warna, gelap dan terang, dengan kontras teks minimal 4,5:1 terhadap latar masing-masing. Pengaturan lewat lingkungan:
+
+| Variabel | Nilai | Fungsi |
+| --- | --- | --- |
+| `YTDL_THEME` | `auto` (bawaan), `dark`, `light` | Set warna. `auto` membaca `COLORFGBG`; tanpa itu dianggap gelap. |
+| `YTDL_MOTION` | `auto` (bawaan), `off` | `off` mematikan semua animasi (spinner, denyut warna, banner yang diketik). Plain, `NO_COLOR`, dan keluaran non-terminal tidak pernah beranimasi. |
+| `YTDL_INSPECT_WORKERS` | angka, bawaan 3 | Jumlah item playlist yang diperiksa bersamaan; `1` berarti satu per satu. |
+| `NO_COLOR` | nilai apa pun | Tanpa warna, bentuk panel tetap. |
 
 ## Urutan pilihan
 
 1. Tools mengambil judul, durasi, kanal, ukuran asli, dan format yang tersedia. Link video yang juga memuat playlist menawarkan video saja atau playlist.
-2. Playlist menawarkan semua item, checkbox, atau nomor/rentang seperti `1,3,5-10`. Metadata tiap item diperiksa sebelum ringkasan. Video private/deleted dapat dilewati.
+2. Playlist menawarkan semua item, checkbox, atau nomor/rentang seperti `1,3,5-10`. Metadata tiap item diperiksa sebelum ringkasan, tiga item sekaligus; urutan hasil dan perilaku saat dihentikan tidak berubah dibanding satu per satu. Video private/deleted dapat dilewati.
 3. Pilih **Video + audio**, **Audio saja**, atau **Video saja — tanpa suara**.
 4. Untuk video, pilih dulu **Format file**: *Otomatis* atau *MP4 kompatibel* (lihat bagian Hasil video + audio). Setelah itu video menawarkan kualitas maksimal, resolusi asli yang tersedia, atau pemilihan format detail per item. Tidak ada upscale. Pada playlist, target yang tidak tersedia turun ke resolusi terbaik di bawah target; perubahan terlihat dalam ringkasan. Item yang tidak memiliki resolusi di bawah target dilewati.
 5. Pilih bahasa asli per video atau bahasa audio/dub yang benar-benar tersedia. Jika dub pilihan tidak ada pada item playlist, item itu dilewati; tools tidak mengganti bahasa diam-diam. `und` berarti YouTube tidak memberi identitas bahasa.
 6. Audio saja menawarkan **audio asli terbaik** tanpa konversi atau **MP3** dengan konversi lossy. Bisa memilih format/bitrate secara detail.
 7. Subtitle bersifat opsional. Pilih satu atau beberapa track, lalu tinjau ringkasan judul, kualitas, FPS, SDR/HDR, container, audio, perkiraan ukuran, dan tujuan file.
-8. Pilih **Mulai**, **Ubah pilihan**, atau Batal. *Ubah pilihan* kembali ke pertanyaan pertama dengan jawaban sebelumnya sudah terpilih; info video dan playlist tidak diambil ulang. Setelah Mulai, ID job langsung disimpan agar proses dapat dilanjutkan.
+8. Pilih **Mulai**, **Ubah pilihan**, atau Batal. *Ubah pilihan* kembali ke pertanyaan pertama dengan jawaban sebelumnya sudah terpilih; info video dan playlist tidak diambil ulang. Pertanyaan yang tadinya dijawab oleh flag (misalnya `--quality 1080`) ikut ditanyakan lagi, dengan jawaban dari flag itu sudah terpilih. Setelah Mulai, ID job langsung disimpan agar proses dapat dilanjutkan.
 
 Setiap jawaban tetap tertinggal di layar sebagai satu baris riwayat, misalnya `◆ 2/5 Kualitas  1080p`: simbol pink, nomor langkah redup, label biru, jawaban pink. Pilihan jenis unduhan tidak bernomor karena menentukan berapa langkah yang menyusul, sehingga setiap nomor yang tampil akurat. Ringkasan satu video berbentuk kartu (judul, kualitas, berkas, folder tujuan); playlist berbentuk tabel dengan judul yang dipotong dan diakhiri `…`. Dengan `--plain` simbol diganti ASCII (`[2/5] Kualitas: 1080p`).
 
@@ -113,6 +122,12 @@ berkas=$(./youtube-downloader 'LINK' --yes)   # path hasil, satu per baris
 | `--subs en,id\|none` | Bahasa subtitle | tanpa subtitle |
 | `--items 1,3,5-10\|all` | Item playlist | semua |
 | `--playlist` | Link video+playlist: ambil playlist | video saja |
+
+Beberapa link sekaligus: `--links-file berkas.txt` (satu link per baris; baris kosong dan baris berawalan `#` dilewati) hanya bersama `--yes`, menjalankan tiap link dengan flag yang sama dan menolak `--items`/`--playlist`:
+
+```bash
+./youtube-downloader --links-file link.txt --yes --quality 1080
+```
 
 Nilai yang tidak ditawarkan video itu ditolak dengan daftar pilihan; flag yang tidak berlaku untuk pilihan lain (misalnya `--quality` pada audio saja) ditolak, tidak diabaikan diam-diam. Untuk tiap bahasa di `--subs`, CC asli didahulukan dari caption otomatis dan terjemahan; bahasa yang tidak ada disebutkan. Ringkasan tetap dicetak sebelum unduhan.
 
@@ -183,28 +198,29 @@ Default dapat disimpan dalam `settings.json` saat tools berhenti:
 
 Panel diperbarui di tempat yang sama, sekitar 12 kali per detik. Worker hanya melapor sekitar empat kali per detik; di antara dua laporan, bar file digeser sesuai kecepatan terakhir (paling lama 0,3 detik, dan tidak pernah mundur), sehingga geraknya mulus tanpa menambah lalu lintas event.
 
-- Pink `#FFC2D4`: item playlist yang sudah ditangani, termasuk gagal/dilewati.
-- Red `#E8384F`: file video atau audio aktif. Bar direset ketika berganti stream.
-- Sky `#A8D8F0`: nama file, kecepatan, dan informasi pendukung.
-- Blok `█` terisi, `░` kosong. Ukuran tidak diketahui memakai tiga blok bergerak dan tanpa persen/ETA; animasi berhenti saat menunggu/merge/gagal.
+- Pink (gelap `#FFC2D4`, terang `#C9205F`): item playlist yang sudah ditangani, jawaban Anda, dan keberhasilan.
+- Sky blue (gelap `#A8D8F0`, terang `#0B6FA4`): bar file video atau audio yang aktif (berdenyut halus antara biru dan pink), nama file, kecepatan, dan informasi pendukung. Bar direset ketika berganti stream.
+- Merah (gelap `#FF5470`, terang `#D1122F`): hanya untuk kegagalan (`✗`, `Gagal`, `! GAGAL`). Bar yang aktif tidak lagi merah.
+- Blok `█` terisi, `░` kosong. Dengan gerak aktif, status memakai spinner braille dan cahaya yang menyapu teks; saat file selesai bar menyala sekali lalu tenang. Pemeriksaan metadata dan langkah lama lain memakai spinner yang sama, dan banner judul diketik satu kali pada awal sesi interaktif. Ukuran tidak diketahui memakai tiga blok bergerak dan tanpa persen/ETA; animasi berhenti saat menunggu/merge/gagal.
 - Status menampilkan pemeriksaan, pengunduhan, retry, menunggu dengan countdown jika durasinya diketahui, dan penggabungan.
 - Baris `Tahap` menunjukkan posisi item yang sedang berjalan, misalnya `✓ Metadata → ● Video → ○ Audio → ○ Gabung`: ✓ selesai, ● berjalan, ○ menunggu, ✗ tahap yang gagal. Subtitle muncul hanya jika dipilih; untuk video saja atau audio saja tahap terakhir bernama `Simpan`. Tahap yang dilewati (misalnya stream yang sudah ada saat resume) dihitung selesai. Pada terminal sempit hanya tahap yang berjalan yang diberi nama.
 - Playlist (dua item atau lebih) menampilkan jendela 6 baris di bawah bar Item, dengan satu item selesai di atas item yang berjalan: ○ menunggu, ● berjalan, ✓ tersimpan, ! tersimpan tetapi subtitle belum lengkap, ✗ gagal, – dilewati (sudah ada di arsip). Baris disembunyikan pada terminal yang terlalu pendek untuk memuatnya bersama panel.
 
 - Satu video tidak punya batch untuk dihitung, jadi panelnya lima baris: bar File, baris Tahap, nama file, kecepatan, dan `Status ... · berjalan 16d`. Bar Item, baris Hasil, dan baris Durasi hanya muncul untuk playlist. Ringkasan akhir satu video berbentuk kartu (judul; kualitas, codec, format, ukuran; nama file) tanpa hitungan 1/1.
 
-Pada terminal sempit, ukuran dipindah ke baris kecepatan. `NO_COLOR` yang berisi nilai mempertahankan blok tanpa warna (nilai kosong dianggap tidak diatur). `--plain` tidak mencetak setiap pembaruan byte; sebagai gantinya satu baris progres tiap sepersepuluh file (tiap menit bila ukurannya tidak diketahui), sekitar sepuluh baris per stream, misalnya `  video 42% · 120.3 MB/290.1 MB · 12.4 MB/s`, agar log tetap menunjukkan bahwa unduhan hidup. Kegagalan selalu ditandai `! GAGAL`; merah pada bar bukan berarti gagal.
+Pada terminal sempit, ukuran dipindah ke baris kecepatan. `NO_COLOR` yang berisi nilai mempertahankan blok tanpa warna (nilai kosong dianggap tidak diatur). `--plain` tidak mencetak setiap pembaruan byte; sebagai gantinya satu baris progres tiap sepersepuluh file (tiap menit bila ukurannya tidak diketahui), sekitar sepuluh baris per stream, misalnya `  video 42% · 120.3 MB/290.1 MB · 12.4 MB/s`, agar log tetap menunjukkan bahwa unduhan hidup. Kegagalan selalu ditandai `! GAGAL`.
 
 Ctrl+C menghentikan worker dan FFmpeg, memulihkan kursor, mencatat checkpoint, dan keluar dengan kode 130. Setelah selesai/dihentikan ada ringkasan permanen: tiap file dengan ukuran (✓ berhasil, ! subtitle belum lengkap, ✗ gagal beserta alasannya), folder hasil, ID job, dan lokasi log. Info teknis itu selalu tampil, tidak disembunyikan.
 
 ```bash
 ./youtube-downloader status
+./youtube-downloader status --json   # satu objek JSON di stdout untuk skrip
 ./youtube-downloader resume            # menu job yang belum selesai
 ./youtube-downloader resume --last     # yang terbaru, tanpa menu
 ./youtube-downloader resume ID_JOB
 ```
 
-`resume` tanpa ID menampilkan job berstatus prepared, running, interrupted, blocked, atau partial, yang terbaru di atas, lengkap dengan jumlah item selesai dan waktu terakhir. Tanpa terminal, beri ID atau `--last`. `status` menampilkan 10 job terakhir; file job yang rusak ditandai `tidak terbaca` dan tidak membuat `status` gagal. Setiap akhir yang belum selesai ditutup dengan perintah `resume` persis, siap disalin (dengan `--browser firefox` bila yang diminta adalah login).
+`resume` tanpa ID menampilkan job berstatus prepared, running, interrupted, blocked, atau partial, yang terbaru di atas, lengkap dengan jumlah item selesai dan waktu terakhir. Tanpa terminal, beri ID atau `--last`. `status` menampilkan 10 job terakhir (`--json` mencetak versi, platform, dependensi, biner, ukuran `.state`, dan job sebagai satu objek JSON ke stdout, tanpa tabel); file job yang rusak ditandai `tidak terbaca` dan tidak membuat `status` gagal. Setiap akhir yang belum selesai ditutup dengan perintah `resume` persis, siap disalin (dengan `--browser firefox` bila yang diminta adalah login).
 
 File yang masih valid dilewati; varian lain tetap boleh diunduh. Jika hasil dihapus, resume mengunduhnya lagi. File parsial di `.state/temporary/` dipertahankan untuk percobaan berikutnya. Jika format pilihan sudah berubah/hilang di YouTube, buat job baru untuk meninjau pilihan baru. Resume mempertahankan pilihan job, bukan memilih kualitas lain otomatis.
 
@@ -219,13 +235,13 @@ Download publik tidak memakai cookie secara default. Jika YouTube meminta login/
 
 Profil khusus: `--browser 'firefox:/jalur/profil'`. Tools memakai pembaca cookie yt-dlp, bukan meminta password atau membuat file cookie di media. Cookie browser tidak portable untuk komputer lain.
 
-Retry jaringan dibatasi empat kali, timeout socket 30 detik. Permintaan login dan batas laju (HTTP 429) menghentikan batch seketika, karena meneruskan permintaan hanya memperburuknya. Tiga kegagalan berurutan jenis lain (format tidak tersedia, jaringan, atau sistem) juga menghentikannya; video private/dihapus dilewati tanpa dihitung. Bila yt-dlp yang terpasang dirilis lebih dari 45 hari lalu, pesan henti menyebutnya dan menyarankan `update`. Subtitle menghormati `Retry-After` numerik dan retry dengan jeda. Batas permintaan YouTube/403 bisa tetap memerlukan menunggu dan sesi browser yang valid; jangan menganggap setiap penurunan speed sebagai Wi-Fi bermasalah.
+Retry jaringan dibatasi empat kali, timeout socket 30 detik. Permintaan login dan batas laju (HTTP 429) menghentikan batch seketika, karena meneruskan permintaan hanya memperburuknya. Tiga kegagalan berurutan jenis lain (format tidak tersedia, jaringan, atau sistem) juga menghentikannya; video private/dihapus dilewati tanpa dihitung. Bila yt-dlp yang terpasang dirilis lebih dari 45 hari lalu, pesan henti menyebut umurnya dan menyarankan `update --check` untuk melihat apakah ada rilis alat baru (`update` hanya memasang rilis alat ini, bukan yt-dlp terbaru). Subtitle menghormati `Retry-After` numerik dan retry dengan jeda. Batas permintaan YouTube/403 bisa tetap memerlukan menunggu dan sesi browser yang valid; jangan menganggap setiap penurunan speed sebagai Wi-Fi bermasalah.
 
 Detail ada di `.state/download.log` dan `.state/setup.log`. Setiap log dipangkas saat mulai bila melebihi 5 MiB: isi lama dipindah ke `.log.1` (hanya satu salinan lama yang disimpan), sehingga log tidak tumbuh tanpa batas. Log/checkpoint dapat berisi URL bertanda tangan atau informasi sesi; jangan membagikannya mentah. Tools tidak menghapus hasil sukses ketika ada kegagalan.
 
 ## Setup dan pembaruan
 
-Ubuntu memerlukan Python 3.10+ serta FFmpeg/FFprobe. Jika belum ada FFmpeg:
+Ubuntu memerlukan Python 3.11+ serta FFmpeg/FFprobe. Jika belum ada FFmpeg:
 
 ```bash
 sudo apt update
@@ -233,7 +249,7 @@ sudo apt install ffmpeg python3 python3-venv
 bash setup.sh
 ```
 
-Setup membuat lingkungan Python lokal, memasang semua dependensi rilis meskipun yt-dlp global sudah ada (`pip install --require-hashes`: tiap file harus cocok dengan hash SHA-256 di `requirements.lock`, jadi paket yang diganti di PyPI ditolak), dan memasang Deno lokal dari distribusi resmi npm dengan verifikasi checksum SHA-512 yang dipatok (tanpa memerlukan Node/npm terpasang). Unduhan Deno yang terputus atau terpotong dilanjutkan otomatis; arsip yang checksum-nya tidak cocok dibuang dan diunduh ulang sekali dari awal sebelum setup dinyatakan gagal. Rilis 1.3.0 memakai yt-dlp 2026.8.19, EJS 0.8.0, Rich 14.3.4, Questionary 2.1.1, dan Deno 2.9.6; Python 3.10 memakai websockets 16.0 karena 17.2 mensyaratkan Python 3.11+; seluruh dependensi dipatok dalam `requirements.lock`. Ini tidak mengubah tools X Bookmarks.
+Setup membuat lingkungan Python lokal, memasang semua dependensi rilis meskipun yt-dlp global sudah ada (`pip install --require-hashes`: tiap file harus cocok dengan hash SHA-256 di `requirements.lock`, jadi paket yang diganti di PyPI ditolak), dan memasang Deno lokal dari distribusi resmi npm dengan verifikasi checksum SHA-512 yang dipatok (tanpa memerlukan Node/npm terpasang). Unduhan Deno yang terputus atau terpotong dilanjutkan otomatis; arsip yang checksum-nya tidak cocok dibuang dan diunduh ulang sekali dari awal sebelum setup dinyatakan gagal. Rilis 1.3.0 memakai yt-dlp 2026.8.19, EJS 0.8.0, Rich 14.3.4, Questionary 2.1.1, websockets 17.2, dan Deno 2.9.6; seluruh dependensi dipatok dalam `requirements.lock`. Ini tidak mengubah tools X Bookmarks.
 
 ```bash
 bash setup.sh --check
@@ -252,13 +268,13 @@ cd "$HOME/tools/youtube-downloader"
 ./youtube-downloader update --wait
 ```
 
-Windows: `.\youtube-downloader.cmd update --check` dan `.\youtube-downloader.cmd update`. macOS memakai perintah Ubuntu yang sama. Tambahkan `--plain` untuk keluaran teks. Tidak ada pemeriksaan otomatis saat download: pembaruan hanya berjalan saat lo memanggil `update`.
+Windows: `.\youtube-downloader.cmd update --check` dan `.\youtube-downloader.cmd update`. macOS memakai perintah Ubuntu yang sama. Tambahkan `--plain` untuk keluaran teks. Tidak ada pemeriksaan otomatis saat download: pembaruan hanya berjalan saat Anda memanggil `update`.
 
-**Login GitHub sekali pada tiap perangkat.** Repo `fathorrosi-dev/youtube-downloader` privat; akun harus punya akses. Pasang GitHub CLI (`sudo apt install gh` di Ubuntu, `brew install gh` di macOS, `winget install --id GitHub.cli --exact` di Windows), lalu jalankan `gh auth login` dan pilih GitHub.com. Alternatif untuk otomasi: `GH_TOKEN` atau `GITHUB_TOKEN` dengan izin baca Contents repo. Jangan menuliskan token di argumen/perintah yang dibagikan; tools tidak menyimpan token dalam settings, paket, atau log.
+**Login GitHub sekali pada tiap perangkat.** Repo `fathorrosi-dev/youtube-downloader` privat; akun harus punya akses. Pasang GitHub CLI (`sudo apt install gh` di Ubuntu, `brew install gh` di macOS, `winget install --id GitHub.cli --exact` di Windows), lalu jalankan `gh auth login` dan pilih GitHub.com. Alternatif untuk otomasi: `GH_TOKEN` atau `GITHUB_TOKEN` dengan izin baca Contents repo. Jangan menuliskan token di argumen/perintah yang dibagikan; tools tidak menyimpan token dalam settings, paket, atau log. Token yang berisi spasi atau baris baru di tengahnya ditolak dengan pesan yang menyebut asalnya (variabel lingkungan atau `gh auth token`); spasi di ujung dibuang.
 
-Self-update mengambil **rilis stabil yang dipublikasikan setelah CI lintas OS lulus**, bukan isi branch pengembangan. ZIP dan SHA-256 diambil melalui API repo tetap, checksum diperiksa, dan metadata versi/OS/Python divalidasi sebelum installer dijalankan. Rilis sama/lebih lama dilewati; tidak ada downgrade otomatis. Checksum memeriksa integritas paket, bukan keaslian: siapa pun yang bisa mengubah rilis bisa mengubah keduanya. Karena itu rilis juga diberi *attestation* asal-usul (lihat README, bagian pengembang). Bila GitHub CLI tersedia, `update` memeriksanya dengan `gh attestation verify` dan melaporkan hasilnya; secara bawaan paket yang tidak terverifikasi tetap dipasang selama checksum cocok, karena repo privat tidak selalu mendapat fitur ini dari GitHub. Setel `YTDL_VERIFY_ATTESTATION=1` agar verifikasi **wajib**: update ditolak dan program tidak diubah bila attestation tidak dapat diperiksa. Hanya mode wajib itu yang melindungi dari rilis yang diubah.
+Self-update mengambil **rilis stabil yang dipublikasikan setelah CI lintas OS lulus**, bukan isi branch pengembangan. ZIP dan SHA-256 diambil melalui API repo tetap, checksum diperiksa, dan metadata versi/OS/Python divalidasi sebelum installer dijalankan. Rilis sama/lebih lama dilewati; tidak ada downgrade otomatis. Checksum memeriksa integritas paket, bukan keaslian: siapa pun yang bisa mengubah rilis bisa mengubah keduanya. Karena itu rilis juga diberi *attestation* asal-usul (lihat README, bagian pengembang). Bila GitHub CLI tersedia, `update` memeriksanya dengan `gh attestation verify` yang dibatasi ke workflow rilis repo ini (`--signer-workflow`; `gh` lama yang belum mengenal opsinya hanya memeriksa repo, dan pesannya menyebut itu) dan melaporkan hasilnya; secara bawaan paket yang tidak terverifikasi tetap dipasang selama checksum cocok, karena repo privat tidak selalu mendapat fitur ini dari GitHub. Setel `YTDL_VERIFY_ATTESTATION=1` agar verifikasi **wajib**: update ditolak dan program tidak diubah bila attestation tidak dapat diperiksa. Hanya mode wajib itu yang melindungi dari rilis yang diubah.
 
-Pembaruan memakai kunci yang sama dengan download; jika tools aktif, berhenti dengan pesan. `--wait` menunggu. Program lama dicadangkan di `.state/program-backups/`; settings/job/database/media dipertahankan. Kegagalan pemasangan memicu rollback melalui installer. Detail pemasangan ada di `.state/update.log` dan `.state/setup.log`. Saat unduhan paket belum selesai, Ctrl+C membatalkan tanpa mengganti program; setelah tahap pemasangan mulai, Ctrl+C ditunda sampai transaksi selesai/pulih, lalu keluar 130.
+Pembaruan memakai kunci yang sama dengan download; jika tools aktif, berhenti dengan pesan. `--wait` menunggu. Program lama dicadangkan di `.state/program-backups/`; settings/job/database/media dipertahankan. File program yang ada di rilis lama tetapi tidak lagi ada di rilis baru ikut dihapus (daftarnya dibaca dari `release.json`; rilis tanpa daftar tidak menghapus apa pun), dan tetap ada di cadangan. Kegagalan pemasangan memicu rollback melalui installer. Bila proses mati di tengah pemasangan, update berikutnya menolak dan menyuruh menjalankan `rollback`, yang memulihkan dari cadangan pemasangan yang terhenti itu. Installer menunggu hingga 5 detik bila kunci baru saja dilepas pemanggilnya. Detail pemasangan ada di `.state/update.log` dan `.state/setup.log`. Saat unduhan paket belum selesai, Ctrl+C membatalkan tanpa mengganti program; setelah tahap pemasangan mulai, Ctrl+C ditunda sampai transaksi selesai/pulih, lalu keluar 130.
 
 Update manual tetap tersedia sebagai alternatif, termasuk pemasangan pertama dari versi 1.1.0 yang belum mengenal perintah `update`:
 
@@ -286,16 +302,19 @@ Referensi mekanisme sumber: [yt-dlp](https://github.com/yt-dlp/yt-dlp#embedding-
 ./youtube-downloader clean            # hanya daftar, tidak menghapus
 ./youtube-downloader clean --apply    # hapus
 ./youtube-downloader clean --days 7   # cadangan jalur media dianggap lama setelah 7 hari (bawaan 30)
+./youtube-downloader clean --abandoned --days 30   # sertakan folder sementara job yang tidak selesai dan tidak disentuh 30 hari
 ```
 
-Yang dihapus: lingkungan Python lama, cadangan program kecuali yang terbaru dan target `rollback`, folder sementara milik job **yang sudah selesai**, cadangan jalur media yang lebih tua dari batas, cache, dan sisa proses yang terhenti lebih dari sehari. Tidak pernah disentuh: job, arsip, settings, kunci, log, dan media. Tautan simbolik tidak diikuti. `--apply` memakai kunci yang sama dengan download.
+Secara bawaan folder sementara job yang belum selesai tidak disentuh, karena `resume` memakainya. Dengan `--abandoned`, folder milik job yang tidak berstatus selesai dan tidak disentuh lebih dari `--days` hari (bawaan 30; dihitung dari pembaruan terakhir job) dicantumkan dengan ID job, status, umur, dan ukurannya, lalu `--apply` menghapusnya. Job tetap tersimpan; `resume` mengunduh ulang dari awal tanpa folder itu. Folder yang juga dibutuhkan job belum selesai yang lebih muda tidak ikut.
+
+Yang dihapus: lingkungan Python lama, cadangan program kecuali yang terbaru dan target `rollback`, folder sementara milik job **yang sudah selesai** (dan, hanya dengan `--abandoned`, milik job yang ditinggalkan), cadangan jalur media yang lebih tua dari batas, cache, dan sisa proses yang terhenti lebih dari sehari. Tidak pernah disentuh: job, arsip, settings, kunci, log, dan media. Tautan simbolik tidak diikuti. `--apply` memakai kunci yang sama dengan download.
 
 ## Pemeriksaan perangkat dan batas verifikasi
 
-`status` menampilkan OS/arsitektur, Python, ukuran `.state`, lokasi/version FFmpeg, FFprobe, dan Deno, serta versi tiap dependensi terhadap lock. Untuk yt-dlp ditambahkan umur rilisnya (versinya berbentuk tanggal), misalnya `2026.8.19 · rilis 57 hari lalu`, dengan saran menjalankan `update` setelah 45 hari: unduhan YouTube lebih sering gagal bila yt-dlp lama. Tanpa jaringan. `setup --check` memeriksa versi dependensi terhadap lock dan identitas environment. Jika pemeriksaan gagal, jalankan setup normal di perangkat tujuan.
+`status` menampilkan OS/arsitektur, Python, ukuran `.state`, lokasi/version FFmpeg, FFprobe, dan Deno, serta versi tiap dependensi terhadap lock. Untuk yt-dlp ditambahkan umur rilisnya (versinya berbentuk tanggal), misalnya `2026.8.19 · rilis 57 hari lalu`, dengan catatan `sudah lama` setelah 45 hari dan saran `update --check`: unduhan YouTube lebih sering gagal bila yt-dlp lama. Tanpa jaringan, sehingga tidak tahu apakah yt-dlp yang lebih baru sudah ada; pemeriksaan itu dilakukan workflow mingguan di repo. `setup --check` memeriksa versi dependensi terhadap lock dan identitas environment. Jika pemeriksaan gagal, jalankan setup normal di perangkat tujuan.
 
 Pengujian native Windows pada CI memakai **Windows Server 2025 x64**, bukan Windows 11. Pengujian macOS menggunakan runner macOS 15 Intel/Apple Silicon. Pemeriksaan langsung Windows 11 dan Warp merupakan verifikasi terpisah; lihat docs/TEST-REPORT.md (di repo, tidak ikut paket) untuk hasil yang benar-benar sudah berjalan.
 
 Nama hasil mempertahankan judul Unicode yang dipendekkan, ID, kualitas, mode, dan identitas varian. Karakter nama file terlarang Windows diganti; file hasil yang sudah ada tanpa catatan arsip (misalnya proses berhenti tepat saat mencatat) diadopsi bila lolos pemeriksaan media, karena namanya memuat hash varian; file yang tidak lolos menghasilkan pesan gagal, bukan overwrite. Untuk jalur Windows yang terlalu panjang, gunakan folder tools/media yang lebih pendek atau aktifkan dukungan long paths Windows/Python.
 
-Event/log memakai UTF-8; panel beralih ke plain ketika stderr (tempat seluruh tampilan ditulis) bukan terminal atau terminal tidak mendukung interaksi; stdout yang dialihkan tidak mengubahnya. `NO_COLOR` yang berisi nilai menonaktifkan warna. Ctrl+C menyimpan checkpoint, menghentikan worker dan turunannya, lalu mengembalikan 130. Kunci alat berlaku pula untuk setup/update/rollback/migrasi; `--wait` menunggu proses aktif selesai.
+Event/log memakai UTF-8; panel beralih ke plain ketika stderr (tempat seluruh tampilan ditulis) bukan terminal atau terminal tidak mendukung interaksi; stdout yang dialihkan tidak mengubahnya (di Windows hanya menu yang menjadi bernomor, lihat *Mulai dari awal*). `NO_COLOR` yang berisi nilai menonaktifkan warna. Ctrl+C menyimpan checkpoint, menghentikan worker dan turunannya, lalu mengembalikan 130. Kunci alat berlaku pula untuk setup/update/rollback/migrasi; `--wait` menunggu proses aktif selesai.

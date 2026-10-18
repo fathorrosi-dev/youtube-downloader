@@ -7,6 +7,6 @@
     "darwin-x86_64",
     "darwin-aarch64"
   ],
-  "python_min": "3.10",
+  "python_min": "3.11",
   "python_max": "3.14"
 }

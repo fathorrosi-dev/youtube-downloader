@@ -109,7 +109,10 @@ def native_output(value):
 
 
 @contextmanager
-def file_lock(path, wait=False):
+def file_lock(path, wait=False, grace=0.0):
+    """An exclusive lock on `path`. Without `wait` it is refused at once, or after `grace`
+    seconds of trying again (for a lock that is about to be released)."""
+    deadline = time.monotonic() + grace
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:
@@ -128,7 +131,7 @@ def file_lock(path, wait=False):
                 except OSError as exc:
                     if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
                         raise
-                    if not wait:
+                    if not wait and time.monotonic() >= deadline:
                         raise ValueError(
                             "Tools masih berjalan; tunggu sampai kunci bebas."
                         ) from exc
@@ -141,10 +144,16 @@ def file_lock(path, wait=False):
         else:
             import fcntl
 
-            try:
-                fcntl.flock(stream, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-            except BlockingIOError as exc:
-                raise ValueError("Tools masih berjalan; tunggu sampai kunci bebas.") from exc
+            while True:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise ValueError(
+                            "Tools masih berjalan; tunggu sampai kunci bebas."
+                        ) from exc
+                    time.sleep(0.1)
             try:
                 yield
             finally:
@@ -350,11 +359,15 @@ def environment_identity(root):
     }
 
 
-def configure_terminal():
-    """Enable Windows VT processing before Rich writes ANSI; restore on exit."""
+def windows_build():
+    """(major, minor, build) of this Windows, or None on any other system."""
     if os.name != "nt":
-        return True
-    import atexit
+        return None
+    version = sys.getwindowsversion()
+    return (version.major, version.minor, version.build)
+
+
+def _console_api():
     from ctypes import wintypes as w
 
     api = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -364,17 +377,49 @@ def configure_terminal():
     api.GetConsoleMode.restype = w.BOOL
     api.SetConsoleMode.argtypes = [w.HANDLE, w.DWORD]
     api.SetConsoleMode.restype = w.BOOL
-    ready = True
-    for number in (-11, -12):
-        handle = api.GetStdHandle(number)
-        mode = w.DWORD()
-        if not api.GetConsoleMode(handle, ctypes.byref(mode)) or not api.SetConsoleMode(
-            handle, mode.value | 0x5
-        ):
-            ready = False
-            continue
-        atexit.register(api.SetConsoleMode, handle, mode.value)
-    return ready
+    return api, w
+
+
+def _enable_vt(api, w, number):
+    """Switch VT processing on for one standard handle; False when it is not a console."""
+    import atexit
+
+    handle = api.GetStdHandle(number)
+    mode = w.DWORD()
+    if not api.GetConsoleMode(handle, ctypes.byref(mode)):
+        return False
+    if not api.SetConsoleMode(handle, mode.value | 0x5):
+        return False
+    atexit.register(api.SetConsoleMode, handle, mode.value)
+    return True
+
+
+def configure_terminal(windows=None):
+    """True when the display (stderr) takes ANSI escape sequences; Windows needs VT processing
+    switched on first, and it is restored on exit.
+
+    Only stderr decides: every line of this tool's display is written there. stdout (the saved
+    paths go there) is switched on too, so a menu can draw when it is a console, but a stdout
+    that is redirected must not turn the display plain."""
+    if not (os.name == "nt" if windows is None else windows):
+        return True
+    api, w = _console_api()
+    _enable_vt(api, w, -11)
+    return _enable_vt(api, w, -12)
+
+
+def stdout_is_console(windows=None):
+    """True when stdout is a terminal. On Windows the console itself is asked: isatty() also
+    says yes for NUL, and the interactive menus draw through the stdout console."""
+    try:
+        if not sys.stdout.isatty():
+            return False
+    except (AttributeError, ValueError):
+        return False
+    if not (os.name == "nt" if windows is None else windows):
+        return True
+    api, w = _console_api()
+    return bool(api.GetConsoleMode(api.GetStdHandle(-11), ctypes.byref(w.DWORD())))
 
 
 MAX_LOG_BYTES = 5 * 1024**2

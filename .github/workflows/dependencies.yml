@@ -1,7 +1,8 @@
 name: Dependency health
 
 # Weekly check of what compatibility.yml never looks at: whether the hash-locked packages
-# still match PyPI, whether any of them has a known vulnerability, and how old the yt-dlp pin is.
+# still match PyPI, whether any of them has a known vulnerability, and whether the yt-dlp pin is
+# old while a newer yt-dlp exists. (bump-ytdlp.yml prepares the pull request for that bump.)
 # It runs only in CI and adds nothing to the tool. A problem opens (or updates) one issue.
 on:
   schedule:
@@ -35,18 +36,13 @@ jobs:
           python -m pip install --quiet pip-audit==2.9.0
           python -m pip_audit --requirement requirements.lock --no-deps --disable-pip 2>&1 | tee audit.txt
           test "${PIPESTATUS[0]}" -eq 0
-      - name: Age of the yt-dlp pin
+      - name: yt-dlp pin is old and a newer release exists
         id: age
         continue-on-error: true
+        # pipefail: without it the exit code of the check is lost behind `tee` and the step never fails.
         run: |
-          python - <<'PY' 2>&1 | tee age.txt
-          import re, sys
-          from model import PIN_WARN_DAYS, release_age_days
-          pin = re.search(r"yt-dlp\[default\]==([0-9.]+)", open("requirements.txt").read())[1]
-          age = release_age_days(pin)
-          print(f"yt-dlp {pin} was released {age} days ago (warning after {PIN_WARN_DAYS})")
-          sys.exit(1 if age is not None and age > PIN_WARN_DAYS else 0)
-          PY
+          set -o pipefail
+          python scripts/pin_status.py --check 2>&1 | tee age.txt
       - name: Open an issue when something needs attention
         if: steps.lock.outcome == 'failure' || steps.audit.outcome == 'failure' || steps.age.outcome == 'failure'
         env:

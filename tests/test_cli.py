@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
+import testenv  # noqa: F401
 import app
 import compat
 import maintenance
@@ -415,6 +416,10 @@ class Stopping(unittest.TestCase):
 
     def test_an_old_yt_dlp_is_named_only_when_it_could_be_the_cause(self):
         with patch.object(app, "ytdlp_age", return_value=57):
+            # The CLI is offline: it states the age and the way to look, not a command that
+            # would not change yt-dlp (`update` installs this tool's own release).
+            self.assertIn("update --check", app.stop_message("system"))
+            self.assertNotIn("coba jalankan update", app.stop_message("system"))
             self.assertIn("yt-dlp rilis 57 hari lalu", app.stop_message("system"))
             self.assertIn("yt-dlp rilis 57 hari lalu", app.stop_message("format"))
             self.assertNotIn("yt-dlp", app.stop_message("authentication"))
@@ -550,6 +555,8 @@ class Status(unittest.TestCase):
         with patch.object(app, "release_age_days", return_value=57):
             self.assertIn("rilis 57 hari lalu", app.pin_note("yt-dlp", "2026.8.19"))
             self.assertIn("sudah lama", app.pin_note("yt-dlp", "2026.8.19"))
+            self.assertIn("update --check", app.pin_note("yt-dlp", "2026.8.19"))
+            self.assertNotIn("jalankan update", app.pin_note("yt-dlp", "2026.8.19"))
             self.assertEqual(app.pin_note("rich", "14.3.4"), "")
         with patch.object(app, "release_age_days", return_value=10):
             note = app.pin_note("YT-DLP", "2026.10.5")
@@ -905,6 +912,431 @@ class Commands(unittest.TestCase):
             args = argparse.Namespace(old_root="/a", new_root="/b", dry_run=True)
             self.assertEqual(app.rebase_command(args), 0)
         self.assertEqual(calls, [(app.BASE, "/a", "/b", True)])
+
+
+class StatusJson(unittest.TestCase):
+    def run_status(self, state):
+        screen = Silent()
+        out = io.StringIO()
+        with (
+            patch.object(store, "STATE", state),
+            patch.object(app, "STATE", state),
+            redirect_stdout(out),
+        ):
+            app.status(screen, as_json=True)
+        return screen, out.getvalue()
+
+    def test_status_json_is_one_object_on_stdout_and_draws_no_table(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / ".state"
+            state.mkdir()
+            (state / "venv-before-move-1").mkdir()
+            (state / "venv-before-move-1/big").write_bytes(b"x" * 2048)
+            write_job(state, "fine", "complete", "2026-10-14T10:00:00+00:00", 2)
+            (state / "jobs/broken.json").write_text("nope")
+            screen, printed = self.run_status(state)
+        data = json.loads(printed)  # the whole of stdout is that one object
+        self.assertEqual(screen.rows, [])
+        self.assertEqual(data["version"], model.VERSION)
+        self.assertEqual(data["platform"], compat.platform_key())
+        self.assertEqual(
+            sorted(data),
+            sorted(
+                [
+                    "version",
+                    "platform",
+                    "python",
+                    "tools",
+                    "media",
+                    "state",
+                    "dependencies",
+                    "binaries",
+                    "jobs",
+                    "unreadable_jobs",
+                    "packaging_installed",
+                ]
+            ),
+        )
+        self.assertEqual(data["python"]["version"].split(".")[0], "3")
+        self.assertGreaterEqual(data["state"]["bytes"], 2048)
+        self.assertGreaterEqual(data["state"]["reclaimable_bytes"], 2048)
+        self.assertEqual(sorted(data["binaries"]), ["deno", "ffmpeg", "ffprobe"])
+        self.assertIn({"id": "fine", "status": "complete", "items": 2}, data["jobs"])
+        self.assertEqual([x["file"] for x in data["unreadable_jobs"]], ["broken"])
+
+    def test_every_dependency_reports_its_pin_and_whether_it_matches(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / ".state"
+            state.mkdir()
+            _, printed = self.run_status(state)
+        data = json.loads(printed)
+        by_name = {d["name"]: d for d in data["dependencies"]}
+        self.assertIn("yt-dlp", by_name)
+        for dependency in data["dependencies"]:
+            self.assertIn("pin", dependency)
+            if dependency["installed"] is not None:
+                self.assertIsInstance(dependency["matches_pin"], bool)
+        self.assertIsInstance(by_name["yt-dlp"]["release_age_days"], int)
+        self.assertIsNone(by_name["rich"]["release_age_days"])
+
+    def test_json_and_abandoned_belong_to_their_own_commands(self):
+        for argv, fragment in (
+            (["clean", "--json", "--plain"], "--json hanya digunakan dengan status"),
+            (["status", "--abandoned", "--plain"], "--abandoned hanya digunakan dengan clean"),
+            (["resume", "--json", "--plain"], "--json hanya digunakan dengan status"),
+        ):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertEqual(app.main(argv), 1, argv)
+            self.assertIn(fragment, err.getvalue())
+
+
+class LinksFile(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def write(self, text):
+        path = self.root / "links.txt"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_one_link_per_line_blank_and_comment_lines_are_skipped(self):
+        path = self.write(
+            "# favourites\n\nhttps://youtube.com/watch?v=a\n   \n  https://youtu.be/b  \n# end\n"
+        )
+        self.assertEqual(
+            app.read_links(path), ["https://youtube.com/watch?v=a", "https://youtu.be/b"]
+        )
+
+    def test_a_bad_line_is_named_by_its_number(self):
+        path = self.write("https://youtube.com/watch?v=a\n\nnot a link\n")
+        with self.assertRaisesRegex(ValueError, "--links-file baris 3"):
+            app.read_links(path)
+
+    def test_an_empty_or_missing_file_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "tidak berisi link"):
+            app.read_links(self.write("# nothing\n\n"))
+        with self.assertRaisesRegex(ValueError, "tidak dapat dibaca"):
+            app.read_links(self.root / "missing.txt")
+
+    def test_the_file_goes_with_yes_and_replaces_the_link(self):
+        path = self.write("https://youtube.com/watch?v=a\n")
+        for argv, fragment in (
+            (["--links-file", str(path), "--plain"], "hanya bersama --yes"),
+            (["--links-file", str(path), "--yes", "--items", "1", "--plain"], "tidak berlaku"),
+            (["--links-file", str(path), "--yes", "--playlist", "--plain"], "tidak berlaku"),
+            (
+                ["https://youtu.be/x", "--links-file", str(path), "--yes", "--plain"],
+                "jangan beri link lagi",
+            ),
+        ):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertEqual(app.main(argv), 1, argv)
+            self.assertIn(fragment, err.getvalue(), argv)
+
+    def test_several_links_become_one_job_and_a_video_listed_twice_is_taken_once(self):
+        infos = {
+            "https://youtube.com/watch?v=a": metadata("a"),
+            "https://youtu.be/b": metadata("b"),
+            "https://youtube.com/watch?v=a&t=5": metadata("a"),
+        }
+        screen = Silent()
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(store, "STATE", Path(folder)),
+            patch.object(app, "inspect_url", side_effect=lambda url, *a, **k: infos[url]),
+        ):
+            job = app.wizard(
+                screen, list(infos), output=folder, preset={"yes": True, "quality": 720}
+            )
+        self.assertEqual([item["id"] for item in job["items"]], ["a", "b"])
+        self.assertEqual({item["choice"]["actual_quality"] for item in job["items"]}, {720})
+
+    def test_every_link_of_the_file_is_looked_up_with_the_same_flags(self):
+        calls = []
+
+        def inspect(url, browser=None, playlist=False):
+            calls.append(url)
+            return metadata(url[-1])
+
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(store, "STATE", Path(folder)),
+            patch.object(app, "inspect_url", side_effect=inspect),
+        ):
+            app.wizard(
+                Silent(),
+                ["https://youtu.be/a", "https://youtu.be/b"],
+                output=folder,
+                preset={"yes": True},
+            )
+        self.assertEqual(calls, ["https://youtu.be/a", "https://youtu.be/b"])
+
+
+class FlagsInTheEditLoop(unittest.TestCase):
+    def test_an_answer_that_came_from_a_flag_is_asked_again_with_it_selected(self):
+        asked = []
+        confirmations = iter(["edit", True])
+
+        class Menu(Silent):
+            def choose(self, title, options, default=None, step=None, label=None):
+                asked.append((label, default))
+                if label == "Mulai?":
+                    return next(confirmations)
+                return default if default is not None else options[0][1]
+
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(store, "STATE", Path(folder)),
+            patch.object(app, "inspect_url", return_value=metadata()),
+        ):
+            job = app.wizard(
+                Menu(),
+                "https://youtube.com/watch?v=a",
+                output=folder,
+                preset={"quality": 1080},
+            )
+        first = [label for label, _ in asked[: asked.index(("Mulai?", None)) + 1]]
+        self.assertNotIn("Kualitas", first)  # the flag answered it, quietly
+        later = [(label, default) for label, default in asked if label == "Kualitas"]
+        self.assertEqual(later, [("Kualitas", 1080)])  # asked after "Ubah pilihan", preselected
+        self.assertEqual(job["items"][0]["choice"]["actual_quality"], 1080)
+
+
+class PlaylistLookups(unittest.TestCase):
+    """The items of a playlist are looked up a few at a time; what comes out must not depend on
+    which lookup happened to finish first."""
+
+    def entries(self, count):
+        return [{"url": f"https://youtu.be/{n}", "title": f"T{n}"} for n in range(count)]
+
+    def run_selection(self, fake, count=5, workers="3"):
+        screen = Silent()
+        with (
+            patch.dict(os.environ, {"YTDL_INSPECT_WORKERS": workers}),
+            patch.object(app, "inspect_url", side_effect=fake),
+        ):
+            return screen, app.inspect_selection(screen, self.entries(count), None)
+
+    def test_results_keep_the_playlist_order_when_later_items_finish_first(self):
+        import threading
+
+        running = peak = 0
+        guard = threading.Lock()
+
+        def fake(url, browser=None, playlist=False):
+            nonlocal running, peak
+            number = int(url.rsplit("/", 1)[1])
+            with guard:
+                running += 1
+                peak = max(peak, running)
+            time.sleep(0.25 - number * 0.05)  # the first item is the slowest
+            with guard:
+                running -= 1
+            return metadata(str(number))
+
+        _, result = self.run_selection(fake)
+        self.assertEqual([m["id"] for m in result], ["0", "1", "2", "3", "4"])
+        self.assertGreaterEqual(peak, 2)  # they really did overlap
+        self.assertLessEqual(peak, 3)
+
+    def test_one_worker_is_one_lookup_at_a_time_in_order(self):
+        order = []
+
+        def fake(url, browser=None, playlist=False):
+            order.append(url)
+            return metadata(url[-1])
+
+        _, result = self.run_selection(fake, workers="1")
+        self.assertEqual(order, [e["url"] for e in self.entries(5)])
+        self.assertEqual([m["id"] for m in result], ["0", "1", "2", "3", "4"])
+
+    def test_a_setting_that_is_not_a_number_falls_back_to_the_default(self):
+        with patch.dict(os.environ, {"YTDL_INSPECT_WORKERS": "many"}):
+            self.assertEqual(app.inspect_workers(10), app.INSPECT_WORKERS)
+        with patch.dict(os.environ, {"YTDL_INSPECT_WORKERS": "0"}):
+            self.assertEqual(app.inspect_workers(10), 1)
+        with patch.dict(os.environ, {"YTDL_INSPECT_WORKERS": "8"}):
+            self.assertEqual(app.inspect_workers(2), 2)  # never more workers than items
+
+    def test_a_rate_limit_stops_the_batch_and_the_lookups_not_started_are_dropped(self):
+        started = []
+
+        def fake(url, browser=None, playlist=False):
+            started.append(url)
+            if url.endswith("/0"):
+                raise app.WorkerError("Terlalu banyak permintaan", "rate_limit")
+            time.sleep(0.3)
+            return metadata(url[-1])
+
+        with self.assertRaises(app.WorkerError) as caught:
+            self.run_selection(fake, count=10, workers="2")
+        self.assertEqual(caught.exception.category, "rate_limit")
+        self.assertLess(len(started), 10)
+
+    def test_unavailable_items_are_listed_and_skipped_in_order(self):
+        def fake(url, browser=None, playlist=False):
+            if url.endswith(("/1", "/3")):
+                raise app.WorkerError("Video privat", "unavailable")
+            return metadata(url[-1])
+
+        screen, result = self.run_selection(fake)
+        self.assertEqual([m["id"] for m in result], ["0", "2", "4"])
+        self.assertEqual([row[0] for row in screen.rows], ["T1", "T3"])
+
+    def test_three_failures_in_a_row_stop_the_batch_as_they_did_one_at_a_time(self):
+        def fake(url, browser=None, playlist=False):
+            if int(url[-1]) in (1, 2, 3):
+                raise app.WorkerError("koneksi putus", "network")
+            return metadata(url[-1])
+
+        with self.assertRaisesRegex(app.WorkerError, "Tiga kegagalan metadata berurutan"):
+            self.run_selection(fake, count=6)
+
+        # A success in between resets the count.
+        def flaky(url, browser=None, playlist=False):
+            if int(url[-1]) in (1, 2, 4, 5):
+                raise app.WorkerError("koneksi putus", "network")
+            return metadata(url[-1])
+
+        _, result = self.run_selection(flaky, count=6)
+        self.assertEqual([m["id"] for m in result], ["0", "3"])
+
+
+class Abandoned(unittest.TestCase):
+    """`clean --abandoned`: the temporary folders of jobs that were never finished."""
+
+    def setUp(self):
+        from datetime import datetime, timedelta, timezone
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "tools"
+        self.state = self.root / ".state"
+        (self.state / "jobs").mkdir(parents=True)
+        self.choice = model.pick(
+            synthetic(), "video-audio", "best", "en", "original", None, None, False
+        )
+
+        def when(days):
+            return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        def item(name):
+            return {"id": name, "choice": self.choice, "subtitles": []}
+
+        def job(identifier, status, days, *names):
+            items = [item(n) for n in names]
+            record = {
+                "id": identifier,
+                "status": status,
+                "created_at": when(days),
+                "updated_at": when(days),
+                "items": items,
+            }
+            (self.state / "jobs" / (identifier + ".json")).write_text(json.dumps(record))
+            return items
+
+        def folder(it, size):
+            path = self.state / "temporary" / model.variant(it) / "video.part"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * size)
+            return path.parent
+
+        self.when, self.job, self.folder = when, job, folder
+        old = job("old", "blocked", 40, "old-video")
+        self.old_folder = folder(old[0], 300)
+        young = job("young", "blocked", 5, "young-video")
+        self.young_folder = folder(young[0], 200)
+        finished = job("finished", "complete", 90, "finished-video")
+        self.finished_folder = folder(finished[0], 100)
+
+    def listed(self, days=30):
+        return maintenance.abandoned_jobs(self.root, days)
+
+    def test_a_job_of_forty_days_is_listed_and_one_of_five_days_is_not(self):
+        found = self.listed()
+        self.assertEqual([(j, status) for j, status, _, _ in found], [("old", "blocked")])
+        job_id, status, age, entries = found[0]
+        self.assertGreaterEqual(age, 39)
+        self.assertEqual([(path, weight) for path, weight in entries], [(self.old_folder, 300)])
+        self.assertEqual(sorted(j for j, *_ in self.listed(days=3)), ["old", "young"])
+
+    def test_a_finished_job_is_never_abandoned_however_old(self):
+        self.assertNotIn("finished", [j for j, *_ in self.listed(days=1)])
+
+    def test_nothing_is_listed_or_removed_without_the_flag(self):
+        self.assertFalse(
+            any("ditinggalkan" in label for label, _, _ in maintenance.clean(self.root, days=30))
+        )
+        maintenance.clean(self.root, apply=True, days=30)
+        self.assertTrue(self.old_folder.exists())
+
+    def test_the_listing_is_the_plan_and_apply_frees_exactly_that(self):
+        rows = maintenance.clean(self.root, days=30, abandoned=True)
+        listed = {label: (count, weight) for label, count, weight in rows}
+        label = maintenance.CLEAN_CATEGORIES["abandoned"]
+        self.assertEqual(listed[label][0], 1)
+        self.assertGreaterEqual(listed[label][1], 300)
+        self.assertTrue(self.old_folder.exists())  # listing changes nothing
+        applied = maintenance.clean(self.root, apply=True, days=30, abandoned=True)
+        self.assertEqual(applied, rows)
+        self.assertFalse(self.old_folder.exists())
+        self.assertTrue(self.young_folder.exists())
+        self.assertTrue((self.state / "jobs/old.json").exists())  # the job itself stays
+        self.assertEqual(maintenance.clean(self.root, days=30, abandoned=True), [])
+
+    def test_a_folder_that_a_younger_unfinished_job_also_needs_is_kept(self):
+        shared = self.job("sharing", "interrupted", 2, "old-video")  # same variant as `old`
+        self.assertEqual(model.variant(shared[0]), self.old_folder.name)
+        self.assertEqual(self.listed(), [])
+        maintenance.clean(self.root, apply=True, days=30, abandoned=True)
+        self.assertTrue(self.old_folder.exists())
+
+    def test_a_job_without_a_date_is_aged_by_its_file(self):
+        path = self.state / "jobs/undated.json"
+        items = [{"id": "undated-video", "choice": self.choice, "subtitles": []}]
+        path.write_text(json.dumps({"id": "undated", "status": "partial", "items": items}))
+        old = time.time() - 50 * 86400
+        os.utime(path, (old, old))
+        self.folder(items[0], 50)
+        self.assertIn("undated", [j for j, *_ in self.listed()])
+
+    def test_damaged_jobs_do_not_stop_the_listing(self):
+        (self.state / "jobs/broken.json").write_text("{nope")
+        (self.state / "jobs/odd.json").write_text('{"status": "blocked", "items": [1]}')
+        self.assertEqual([j for j, *_ in self.listed()], ["old"])
+
+    def test_the_command_lists_the_jobs_with_age_and_size_and_says_what_resume_does(self):
+        tables = []
+
+        class Capture(Silent):
+            def table(self, headers, rows):
+                tables.append((headers, list(rows)))
+
+        def command(**kw):
+            screen = Capture()
+            args = SimpleNamespace(**{"apply": False, "days": 30, "abandoned": True, **kw})
+            with patch.object(app, "BASE", self.root), patch.object(app, "lock", nullcontext):
+                self.assertEqual(app.clean_command(screen, args), 0)
+            return screen
+
+        screen = command()
+        headers, rows = tables[0]
+        self.assertEqual(headers[0], "Job ditinggalkan")
+        self.assertEqual(rows[0][0], "old")
+        self.assertEqual(rows[0][1], "blocked")
+        self.assertRegex(rows[0][2], r"^\d+ hari$")
+        self.assertTrue(any("resume mengunduh ulang" in line for line in screen.said))
+        self.assertTrue(any("Dapat dibebaskan" in line for line in screen.said))
+        command(apply=True)
+        self.assertFalse(self.old_folder.exists())
+        tables.clear()
+        again = command()
+        self.assertEqual(tables, [])
+        self.assertEqual(again.said, ["Tidak ada yang perlu dibersihkan."])
 
 
 class Documents(unittest.TestCase):

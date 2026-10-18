@@ -1,0 +1,77 @@
+name: Bump yt-dlp pin
+
+# Weekly: when PyPI has a newer yt-dlp than the pin, prepare a pull request that changes only
+# the pin (requirements.txt), the pin and EJS version in requirements.lock, and the hashes.
+# A person merges it after the 12 native jobs pass and tags the release; nothing here publishes.
+#
+# Needs one repository setting: Settings > Actions > General > "Allow GitHub Actions to create
+# and approve pull requests". Without it the branch is still pushed and the run says so.
+# Pushes and pull requests made with the default token do not start other workflows, so the
+# native compatibility run is started explicitly (workflow_dispatch) on the new branch.
+on:
+  schedule:
+    - cron: '47 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: bump-ytdlp
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Prepare the pin bump
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # Credentials stay persisted: this job pushes a branch. It runs only scripts of this repository.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Change the pin and the hashes
+        id: pin
+        run: |
+          set -euo pipefail
+          python scripts/pin_status.py --bump
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python scripts/lock_hashes.py
+          unexpected=$(git diff --name-only | grep -vxE 'requirements\.(txt|lock)' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected changes: $unexpected"
+            exit 1
+          fi
+          version=$(python -c "import re; print(re.search(r'yt-dlp\[default\]==([0-9.]+)', open('requirements.txt').read())[1])")
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Push the branch and open the pull request
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pin.outputs.version }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          branch="bump/yt-dlp-$VERSION"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "::notice title=Already prepared::$branch already exists; nothing to do."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add requirements.txt requirements.lock
+          git commit -m "Bump yt-dlp to $VERSION"
+          git push origin "$branch"
+          gh workflow run compatibility.yml --ref "$branch"
+          body="Automatic bump of the yt-dlp pin (and the EJS version it requires) with new hashes. The diff is only requirements.txt and requirements.lock. The native compatibility run was started on this branch; merge only when all 12 jobs pass, then bump the tool version and tag as usual."
+          if ! gh pr create --base "$BASE" --head "$branch" --title "Bump yt-dlp to $VERSION" --body "$body"; then
+            echo "::warning title=Pull request not created::Branch $branch was pushed. Allow Actions to create pull requests (Settings > Actions > General) or open it by hand: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${BASE}...${branch}"
+          fi

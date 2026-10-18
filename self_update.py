@@ -27,6 +27,7 @@ from compat import (
 
 REPOSITORY = "fathorrosi-dev/youtube-downloader"
 API = "https://api.github.com/repos/" + REPOSITORY
+SIGNER_WORKFLOW = REPOSITORY + "/.github/workflows/compatibility.yml"
 MAX_ARCHIVE = 100 * 1024 * 1024
 
 
@@ -46,10 +47,25 @@ def installed_version(root):
     return match[1]
 
 
+def clean_token(value, source):
+    """The token without surrounding whitespace, or a message naming where a malformed one
+    came from (a newline or space inside a token breaks the Authorization header)."""
+    token = (value or "").strip()
+    if not token:
+        return ""
+    if not token.isascii() or any(c.isspace() or not c.isprintable() for c in token):
+        raise ValueError(
+            "Token GitHub dari " + source + " tidak valid: berisi spasi, baris baru, atau karakter "
+            "non-ASCII. Salin ulang token tanpa karakter tambahan."
+        )
+    return token
+
+
 def github_token():
     for name in ("GH_TOKEN", "GITHUB_TOKEN"):
-        if os.environ.get(name):
-            return os.environ[name].strip()
+        token = clean_token(os.environ.get(name), "variabel lingkungan " + name)
+        if token:
+            return token
     if shutil.which("gh"):
         result = subprocess.run(
             ["gh", "auth", "token", "--hostname", "github.com"],
@@ -58,8 +74,10 @@ def github_token():
             encoding="utf-8",
             timeout=15,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+        if result.returncode == 0:
+            token = clean_token(result.stdout, "gh auth token")
+            if token:
+                return token
     raise ValueError(
         "Repo rilis privat membutuhkan login GitHub. Pasang GitHub CLI lalu jalankan gh auth login; gunakan akun yang punya akses repo."
     )
@@ -256,15 +274,25 @@ def verify_attestation(archive, say=print, which=shutil.which, run=subprocess.ru
     gh = which("gh")
     if not gh:
         return refuse("GitHub CLI (gh) tidak ditemukan")
-    try:
-        result = run(
-            [gh, "attestation", "verify", str(archive), "--repo", REPOSITORY],
+
+    def attempt(extra):
+        return run(
+            [gh, "attestation", "verify", str(archive), "--repo", REPOSITORY, *extra],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             timeout=60,
         )
+
+    # Tie the package to the release workflow itself, not just to any workflow of the repository.
+    # An older gh does not know the flag; then only the repository is checked and the message says so.
+    narrowed = True
+    try:
+        result = attempt(["--signer-workflow", SIGNER_WORKFLOW])
+        if result.returncode and "unknown flag" in (result.stderr or "").lower():
+            narrowed = False
+            result = attempt([])
     except (OSError, subprocess.SubprocessError) as exc:
         return refuse("gh tidak dapat dijalankan (" + str(exc) + ")")
     if result.returncode:
@@ -272,7 +300,12 @@ def verify_attestation(archive, say=print, which=shutil.which, run=subprocess.ru
         return refuse(
             "verifikasi ditolak (" + (lines[-1].strip() if lines else "tanpa pesan") + ")"
         )
-    say("Attestation rilis terverifikasi.")
+    say(
+        "Attestation rilis terverifikasi (dibuat oleh workflow rilis repositori ini)."
+        if narrowed
+        else "Attestation rilis terverifikasi untuk repositori ini; gh versi ini belum bisa "
+        "membatasi ke workflow rilis (perbarui gh agar pemeriksaannya lebih ketat)."
+    )
     return True
 
 
@@ -315,7 +348,9 @@ def install_package(source, root, wait=False, say=print):
             "--installer",
             str(source),
             str(root),
-            *(["--wait"] if wait else []),
+            # A lock that the updater has just released can take a moment to be free again
+            # (Windows); wait a few seconds instead of failing the whole update.
+            *(["--wait"] if wait else ["--grace", "5"]),
         ]
         previous = signal.signal(signal.SIGINT, defer)
         try:

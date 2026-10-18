@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import re
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -21,6 +22,7 @@ from contextlib import redirect_stderr, redirect_stdout
 
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
+import testenv  # noqa: F401
 import maintenance
 import model
 import store
@@ -371,7 +373,7 @@ class Wizard(unittest.TestCase):
                 @contextmanager
                 def spinner():
                     messages.append(message)
-                    yield messages.append
+                    yield lambda text, step=None: messages.append(text)
 
                 return spinner()
 
@@ -633,6 +635,496 @@ class RuntimeDownload(unittest.TestCase):
         self.assertEqual(self.ranges, [None])
         self.assertNotIn("terputus", output)
         self.assertTrue((self.root / ".runtime/installed.json").is_file())
+
+
+class ReleaseList(unittest.TestCase):
+    def test_which_paths_count_as_the_program(self):
+        for name in (
+            "app.py",
+            "release.json",
+            "youtube-downloader",
+            "requirements.lock",
+            "README.md",
+            "docs.svg",
+            "tests/test_one.py",
+            "tests/sub/test_two.py",
+            ".github/workflows/ci.yml",
+            ".bootstrap/pip.whl",
+            ".gitignore",
+        ):
+            self.assertTrue(maintenance.is_program_path(name), name)
+        for name in (
+            "",
+            ".",
+            "..",
+            "../app.py",
+            "tests/../../app.py",
+            "/etc/passwd",
+            "a\\b.py",
+            "C:app.py",
+            "settings.json",
+            ".state/job.json",
+            ".venv/bin/python",
+            "tests",
+            "media/video.mp4",
+            "sub/app.py",
+            "docs/notes.md",
+        ):
+            self.assertFalse(maintenance.is_program_path(name), name)
+
+    def test_the_list_of_a_release_is_read_sorted_and_checked(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+
+            def write(value):
+                (root / "release.json").write_text(json.dumps(value))
+                return maintenance.release_files(root)
+
+            self.assertEqual(write({"files": ["b.py", "a.py", "a.py"]}), ["a.py", "b.py"])
+            self.assertIsNone(write({"version": "1"}))  # a release without a list
+            self.assertIsNone(write({"files": "app.py"}))
+            self.assertIsNone(write({"files": ["app.py", "../outside.py"]}))
+            self.assertIsNone(write({"files": ["app.py", 3]}))
+            (root / "release.json").write_text("{nope")
+            self.assertIsNone(maintenance.release_files(root))
+            (root / "release.json").unlink()
+            self.assertIsNone(maintenance.release_files(root))
+
+    def test_program_files_are_listed_with_forward_slashes_and_without_private_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in (
+                "app.py",
+                "tests/test_one.py",
+                ".github/workflows/ci.yml",
+                "settings.json",
+            ):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text("x")
+            (root / "tests/__pycache__").mkdir()
+            (root / "tests/__pycache__/x.pyc").write_text("x")
+            names = maintenance.program_files(root)
+        self.assertEqual(names, [".github/workflows/ci.yml", "app.py", "tests/test_one.py"])
+
+
+class UpdateTransaction(unittest.TestCase):
+    """What `update` removes, and how an installation that died half way is put right."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.old, self.new = self.root / "old", self.root / "new"
+        common = (
+            "model.py",
+            "requirements.txt",
+            "requirements.lock",
+            "runtime.json",
+            "youtube-downloader",
+        )
+        for root, version, extra in (
+            (self.old, "0.9.0", ("legacy.py", "tests/test_legacy.py")),
+            (self.new, "1.0.0", ("added.py",)),
+        ):
+            (root / ".state").mkdir(parents=True)
+            (root / "tests").mkdir()
+            (root / "app.py").write_text(version)
+            for name in (*common, *extra):
+                (root / name).write_text(version)
+            (root / "model.py").write_text("VERSION='" + version + "'\n")
+        (self.old / "settings.json").write_text('{"output":"custom"}')
+
+    def meta(self, root, files=None):
+        record = {"platforms": [platform_key()]}
+        if files is not None:
+            record["files"] = sorted({*files, "release.json"})
+        (root / "release.json").write_text(json.dumps(record))
+
+    def listed(self, root):
+        return [
+            p.relative_to(root).as_posix()
+            for p in root.rglob("*")
+            if p.is_file() and ".state" not in p.parts and p.name != "settings.json"
+        ]
+
+    def update(self):
+        out = io.StringIO()
+        with (
+            patch.object(maintenance, "setup"),
+            redirect_stdout(out),
+            redirect_stderr(io.StringIO()),
+        ):
+            maintenance.update(self.new, self.old)
+        return out.getvalue()
+
+    def test_a_file_the_new_release_dropped_is_removed_and_kept_in_the_backup(self):
+        self.meta(self.old, self.listed(self.old))
+        self.meta(self.new, self.listed(self.new))
+        said = self.update()
+        self.assertFalse((self.old / "legacy.py").exists())
+        self.assertFalse((self.old / "tests/test_legacy.py").exists())
+        self.assertEqual((self.old / "added.py").read_text(), "1.0.0")
+        self.assertEqual((self.old / "app.py").read_text(), "1.0.0")
+        self.assertIn("legacy.py", said)
+        backup = Path(json.loads((self.old / ".state/last-update.json").read_text())["backup"])
+        self.assertEqual((backup / "legacy.py").read_text(), "0.9.0")
+        manifest = json.loads((backup / "manifest.json").read_text())
+        self.assertEqual(sorted(manifest["removed"]), ["legacy.py", "tests/test_legacy.py"])
+        self.assertIn("added.py", manifest["added"])
+        self.assertTrue((self.old / "settings.json").exists())
+
+    def test_rolling_back_brings_the_removed_files_back_and_removes_the_added_ones(self):
+        self.meta(self.old, self.listed(self.old))
+        self.meta(self.new, self.listed(self.new))
+        self.update()
+        with (
+            patch.object(maintenance, "setup"),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            maintenance.rollback(self.old)
+        self.assertEqual((self.old / "legacy.py").read_text(), "0.9.0")
+        self.assertEqual((self.old / "tests/test_legacy.py").read_text(), "0.9.0")
+        self.assertEqual((self.old / "app.py").read_text(), "0.9.0")
+        self.assertFalse((self.old / "added.py").exists())
+
+    def test_an_installed_release_without_a_list_never_loses_a_file(self):
+        self.meta(self.old)  # a release from before the list existed
+        self.meta(self.new, self.listed(self.new))
+        self.update()
+        self.assertEqual((self.old / "legacy.py").read_text(), "0.9.0")
+
+    def test_a_file_that_is_not_in_the_installed_list_is_not_touched(self):
+        self.meta(self.old, [n for n in self.listed(self.old) if n != "legacy.py"])
+        self.meta(self.new, self.listed(self.new))
+        self.update()
+        self.assertEqual((self.old / "legacy.py").read_text(), "0.9.0")
+
+    def test_a_package_that_lacks_a_listed_file_is_refused_before_anything_changes(self):
+        self.meta(self.old, self.listed(self.old))
+        self.meta(self.new, [*self.listed(self.new), "promised.py"])
+        with self.assertRaisesRegex(ValueError, "tidak lengkap.*promised.py"):
+            self.update()
+        self.assertEqual((self.old / "app.py").read_text(), "0.9.0")
+        self.assertFalse((self.old / maintenance.UPDATE_JOURNAL).exists())
+
+    def test_a_failed_update_leaves_no_journal_and_the_old_program(self):
+        self.meta(self.old, self.listed(self.old))
+        self.meta(self.new, self.listed(self.new))
+
+        def setup(root, **kw):
+            if not kw.get("upgrade"):
+                raise ValueError("installation failure")
+
+        with patch.object(maintenance, "setup", side_effect=setup), redirect_stdout(io.StringIO()):
+            with self.assertRaises(ValueError):
+                maintenance.update(self.new, self.old)
+        self.assertEqual((self.old / "app.py").read_text(), "0.9.0")
+        self.assertEqual((self.old / "legacy.py").read_text(), "0.9.0")
+        self.assertFalse((self.old / maintenance.UPDATE_JOURNAL).exists())
+
+    def hard_stop(self, after):
+        """Run the update in another process that dies, without any clean-up, once `after` files
+        have been put in place: what a power cut or a killed window does."""
+        script = (
+            "import os, sys, shutil\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, sys.argv[3])\n"
+            "import maintenance\n"
+            "real, count = shutil.copy2, [0]\n"
+            "def copy(src, dst, *a, **k):\n"
+            "    if str(dst).endswith('.new'):\n"
+            "        count[0] += 1\n"
+            "        if count[0] > int(sys.argv[4]):\n"
+            "            os._exit(9)\n"
+            "    return real(src, dst, *a, **k)\n"
+            "maintenance.shutil.copy2 = copy\n"
+            "maintenance.setup = lambda *a, **k: None\n"
+            "maintenance.update(Path(sys.argv[1]), Path(sys.argv[2]))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(self.new), str(self.old), str(BASE), str(after)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 9, result.stderr)
+
+    def test_an_installation_killed_half_way_is_put_right_by_rollback(self):
+        self.meta(self.old, self.listed(self.old))
+        self.meta(self.new, self.listed(self.new))
+        self.hard_stop(after=2)
+        # Some files are the new release and some the old one: the program is in pieces.
+        contents = {(self.old / n).read_text() for n in ("app.py", "model.py", "runtime.json")}
+        self.assertIn("1.0.0", contents)
+        self.assertTrue((self.old / maintenance.UPDATE_JOURNAL).exists())
+        # Another update does not build on that.
+        with patch.object(maintenance, "setup"):
+            with self.assertRaisesRegex(ValueError, "rollback"):
+                maintenance.update(self.new, self.old)
+        out = io.StringIO()
+        with patch.object(maintenance, "setup"), redirect_stdout(out):
+            maintenance.rollback(self.old)
+        self.assertIn("terhenti", out.getvalue())
+        for name in ("app.py", "model.py", "runtime.json", "legacy.py"):
+            self.assertEqual(
+                (self.old / name).read_text().strip().split("=")[-1].strip("'\n"), "0.9.0", name
+            )
+        self.assertFalse((self.old / "added.py").exists())
+        self.assertFalse((self.old / maintenance.UPDATE_JOURNAL).exists())
+        self.assertEqual((self.old / "settings.json").read_text(), '{"output":"custom"}')
+        # The way is clear for the next update.
+        self.meta(self.old, self.listed(self.old))
+        self.update()
+        self.assertEqual((self.old / "app.py").read_text(), "1.0.0")
+
+    def test_a_kill_before_any_file_changes_is_recovered_just_the_same(self):
+        self.meta(self.old, self.listed(self.old))
+        self.meta(self.new, self.listed(self.new))
+        self.hard_stop(after=0)
+        with patch.object(maintenance, "setup"), redirect_stdout(io.StringIO()):
+            maintenance.rollback(self.old)
+        self.assertEqual((self.old / "app.py").read_text(), "0.9.0")
+        self.assertFalse((self.old / maintenance.UPDATE_JOURNAL).exists())
+
+    def test_a_journal_that_points_outside_the_backups_is_refused(self):
+        journal = self.old / maintenance.UPDATE_JOURNAL
+        journal.write_text(json.dumps({"backup": str(self.root)}))
+        with self.assertRaisesRegex(ValueError, "Lokasi cadangan tidak valid"):
+            maintenance.rollback(self.old)
+        self.assertTrue(journal.exists())
+
+    def test_a_backup_that_names_a_path_outside_the_program_is_not_restored(self):
+        backup = self.old / ".state/program-backups/1"
+        backup.mkdir(parents=True)
+        (backup / "manifest.json").write_text(
+            json.dumps({"files": ["../escape.py"], "added": [], "platforms": [platform_key()]})
+        )
+        with patch.object(maintenance, "setup"):
+            with self.assertRaisesRegex(ValueError, "jalur yang tidak valid"):
+                maintenance.restore(self.old, backup)
+        self.assertFalse((self.root / "escape.py").exists())
+
+    def test_the_command_line_accepts_a_grace_period_for_the_lock(self):
+        result = subprocess.run(
+            [sys.executable, str(BASE / "maintenance.py"), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("--grace", result.stdout)  # hidden: it is for the updater's own use
+
+
+class LockGrace(unittest.TestCase):
+    def test_a_lock_released_within_the_grace_period_is_taken_and_otherwise_refused(self):
+        import compat
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / ".state/run.lock"
+            holding = threading.Event()
+
+            def hold():
+                with compat.file_lock(path):
+                    holding.set()
+                    time.sleep(0.6)
+
+            thread = threading.Thread(target=hold)
+            thread.start()
+            try:
+                self.assertTrue(holding.wait(10))
+                with self.assertRaisesRegex(ValueError, "Tools masih berjalan"):
+                    with compat.file_lock(path):
+                        pass
+                started = time.monotonic()
+                with compat.file_lock(path, grace=10):
+                    waited = time.monotonic() - started
+                self.assertLess(waited, 8)
+            finally:
+                thread.join()
+
+    def test_a_lock_that_stays_held_is_refused_when_the_grace_runs_out(self):
+        import compat
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / ".state/run.lock"
+            with compat.file_lock(path):
+                started = time.monotonic()
+                with self.assertRaises(ValueError):
+                    with compat.file_lock(path, grace=0.3):
+                        pass
+                self.assertGreaterEqual(time.monotonic() - started, 0.25)
+
+
+class TemporaryFolders(unittest.TestCase):
+    def test_a_folder_that_cannot_be_removed_is_left_and_said_not_failed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            temp = Path(folder) / "variant"
+            temp.mkdir()
+            (temp / "video.part").write_bytes(b"x")
+            for broken in (PermissionError(13, "in use"), None):
+                err = io.StringIO()
+                with (
+                    patch.object(
+                        worker.shutil,
+                        "rmtree",
+                        side_effect=broken,
+                    ),
+                    redirect_stderr(err),
+                ):
+                    self.assertFalse(worker.remove_temporary(temp))
+                self.assertIn("jalankan clean", err.getvalue())
+                self.assertTrue(temp.exists())
+
+    def test_a_folder_that_can_be_removed_is_removed_quietly(self):
+        with tempfile.TemporaryDirectory() as folder:
+            temp = Path(folder) / "variant"
+            (temp / "sub").mkdir(parents=True)
+            (temp / "sub/video.part").write_bytes(b"x")
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertTrue(worker.remove_temporary(temp))
+            self.assertFalse(temp.exists())
+            self.assertEqual(err.getvalue(), "")
+
+
+class Windows(unittest.TestCase):
+    def test_a_path_is_too_long_only_on_windows_and_only_past_the_limit(self):
+        limit = worker.WINDOWS_PATH_LIMIT
+        self.assertEqual(limit, 259)
+        self.assertEqual(worker.path_too_long("a" * (limit + 1), windows=True), limit + 1)
+        self.assertIsNone(worker.path_too_long("a" * limit, windows=True))
+        self.assertIsNone(worker.path_too_long("a" * 1000, windows=False))
+        self.assertEqual(worker.path_too_long("abcdef", windows=True, limit=5), 6)
+
+    def test_a_long_destination_is_refused_before_anything_is_downloaded(self):
+        item = {
+            "id": "x",
+            "title": "T",
+            "url": "https://youtu.be/x",
+            "choice": model.pick(
+                synthetic(), "video-audio", "best", "en", "original", None, None, False
+            ),
+            "subtitles": [],
+        }
+        events = []
+
+        class Events:
+            def send(self, kind, **kwargs):
+                events.append(kind)
+
+            hook = pp_hook = staticmethod(lambda *a: None)
+
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(worker, "path_too_long", return_value=301),
+            patch.object(worker.yt_dlp, "YoutubeDL") as extractor,
+        ):
+            with self.assertRaisesRegex(ValueError, "301 karakter.*batas Windows.*--output"):
+                worker.download({"item": item, "output": folder}, Events())
+            extractor.assert_not_called()
+            self.assertEqual(list(Path(folder).iterdir()), [])  # nothing was created either
+
+
+class FfmpegFailure(unittest.TestCase):
+    def test_a_failing_ffmpeg_is_one_sentence_without_the_command_line(self):
+        secret = "/private/folder/.state/temporary/abc/video.f137.mp4"
+
+        class Events:
+            def __init__(self):
+                self.sent = []
+
+            def send(self, kind, **kwargs):
+                self.sent.append((kind, kwargs))
+
+        events = Events()
+        failure = subprocess.CalledProcessError(
+            1, ["ffmpeg", "-nostdin", "-i", secret, "-c", "copy", "out.mkv"]
+        )
+        with patch.object(worker.subprocess, "run", side_effect=failure):
+            with self.assertRaises(ValueError) as caught:
+                worker.ffmpeg(["-i", secret], events, "Menggabungkan video + audio", "finish")
+        message = str(caught.exception)
+        self.assertIn("FFmpeg gagal (kode 1)", message)
+        self.assertIn("menggabungkan video + audio", message)
+        self.assertIn(".state/download.log", message)
+        for leaked in (secret, "-nostdin", "CalledProcessError", "Command"):
+            self.assertNotIn(leaked, message)
+        self.assertEqual(events.sent[0][0], "stage")  # the stage was still announced
+
+
+class DamagedArchive(unittest.TestCase):
+    """A record that cannot be used is skipped and noted; the batch goes on."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name)
+        patcher = patch.object(store, "STATE", self.state)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.archive = store.Archive()
+        self.addCleanup(self.archive.close)
+        self.media = self.state / "media"
+        self.media.mkdir()
+        self.good = self.media / "good.mkv"
+        self.good.write_bytes(b"video")
+
+    def add(self, payload, path="x"):
+        self.archive.db.execute("INSERT INTO results VALUES (?,?,?)", ("v", path, payload))
+        self.archive.db.commit()
+
+    def good_payload(self):
+        return json.dumps({"path": str(self.good), "mode": "video-audio", "subtitles": []})
+
+    def log(self):
+        path = self.state / "download.log"
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def test_rows_that_cannot_be_read_are_skipped_and_the_next_usable_one_is_returned(self):
+        self.add(self.good_payload(), "a")
+        self.add("{not json", "b")
+        self.add(json.dumps({"mode": "video-audio"}), "c")  # no path
+        self.add(json.dumps({"path": 7}), "d")  # a path that is not text
+        self.add(json.dumps(["not", "an", "object"]), "e")
+        with patch.object(store, "probe"):
+            result = self.archive.get("v", "video-audio")
+        self.assertEqual(result["path"], str(self.good))
+        self.assertEqual(self.log().count("Catatan arsip dilewati"), 4)
+
+    def test_a_missing_ffprobe_means_download_again_not_a_failed_batch(self):
+        self.add(self.good_payload())
+        with patch.object(store, "probe", side_effect=FileNotFoundError("ffprobe")):
+            self.assertIsNone(self.archive.get("v", "video-audio"))
+        self.assertIn("FileNotFoundError", self.log())
+
+    def test_a_record_for_a_file_that_is_gone_or_fails_the_probe_is_not_usable(self):
+        gone = json.dumps({"path": str(self.media / "gone.mkv"), "mode": "video-audio"})
+        self.add(gone)
+        self.assertIsNone(self.archive.get("v", "video-audio"))
+        self.add(self.good_payload(), "y")
+        with patch.object(store, "probe", side_effect=ValueError("FFprobe menolak hasil media")):
+            self.assertIsNone(self.archive.get("v", "video-audio"))
+
+    def test_a_result_outside_the_output_folder_is_not_reused(self):
+        self.add(self.good_payload())
+        other = self.state / "elsewhere"
+        other.mkdir()
+        with patch.object(store, "probe"):
+            self.assertIsNone(self.archive.get("v", "video-audio", output=other))
+            self.assertIsNotNone(self.archive.get("v", "video-audio", output=self.media))
+
+    def test_the_note_is_written_even_when_the_state_folder_is_new(self):
+        shutil_target = self.state / "fresh"
+        with patch.object(store, "STATE", shutil_target):
+            store.log_note("satu catatan")
+        self.assertIn("satu catatan", (shutil_target / "download.log").read_text(encoding="utf-8"))
+
+    def test_a_note_that_cannot_be_written_never_raises(self):
+        blocked = self.state / "file-not-folder"
+        blocked.write_text("x")
+        with patch.object(store, "STATE", blocked):
+            store.log_note("tidak bisa ditulis")
 
 
 if __name__ == "__main__":

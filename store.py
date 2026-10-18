@@ -30,6 +30,17 @@ def write_json(path, value):
     temp.replace(path)
 
 
+def log_note(message):
+    """One line in download.log, for something that was skipped and should be findable later.
+    Failing to write it is never a reason to stop."""
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        with (STATE / "download.log").open("a", encoding="utf-8") as log:
+            log.write(f"{now()} {message}\n")
+    except OSError:
+        pass
+
+
 def lock(wait=False):
     return file_lock(STATE / "run.lock", wait)
 
@@ -153,28 +164,41 @@ class Archive:
         self.db.close()
 
     def get(self, key, mode, output=None):
+        """The usable earlier result of this variant, or None. A record that cannot be read (a
+        damaged row, a missing ffprobe) is noted in the log and skipped; it never stops the
+        batch, because the file is simply downloaded again."""
         for row in self.db.execute(
             "SELECT payload FROM results WHERE variant=? ORDER BY rowid DESC", (key,)
         ):
-            result = json.loads(row[0])
-            path = Path(result["path"])
-            if output and not path.resolve().is_relative_to(Path(output).resolve()):
-                continue
-            if not path.is_file():
-                continue
             try:
-                probe(path, mode)
-            except (ValueError, subprocess.SubprocessError):
+                result = self._usable(row[0], mode, output)
+            except (OSError, KeyError, ValueError, TypeError, AttributeError) as exc:
+                log_note(f"Catatan arsip dilewati ({type(exc).__name__}: {exc})")
                 continue
-            missing = [
-                track for track in result.get("subtitles", []) if not Path(track["path"]).is_file()
-            ]
-            if missing:
-                result["missing"] = list(
-                    {x["key"]: x for x in result.get("missing", []) + missing}.values()
-                )
-            return result
+            if result:
+                return result
         return None
+
+    @staticmethod
+    def _usable(payload, mode, output):
+        result = json.loads(payload)
+        path = Path(result["path"])
+        if output and not path.resolve().is_relative_to(Path(output).resolve()):
+            return None
+        if not path.is_file():
+            return None
+        try:
+            probe(path, mode)
+        except (ValueError, subprocess.SubprocessError):
+            return None
+        missing = [
+            track for track in result.get("subtitles", []) if not Path(track["path"]).is_file()
+        ]
+        if missing:
+            result["missing"] = list(
+                {x["key"]: x for x in result.get("missing", []) + missing}.values()
+            )
+        return result
 
     def put(self, key, result):
         probe(result["path"], result["mode"])

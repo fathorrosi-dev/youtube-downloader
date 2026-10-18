@@ -21,7 +21,7 @@ Windows PowerShell: `.\migrate.cmd "$HOME\tools\youtube-downloader"`, lalu `.\se
 
 1. Tunggu proses selesai. Salin seluruh paket termasuk file tersembunyi, settings dan `.state`. Kecualikan `.venv`, `.runtime`, `__pycache__`, `.git`, serta `run.lock`. `.bootstrap`, lock dependensi, runtime/release metadata, launcher, dan program wajib ikut.
 2. Salin **media terpisah** ke folder tujuan yang diinginkan. Pertahankan subfolder `video`, `audio`, `subtitle` dan nama file. Tidak ada konversi atau perubahan kualitas.
-3. Pasang Python standar 3.10–3.14 dan FFmpeg/FFprobe sesuai PANDUAN.md. Jalankan setup pada perangkat tujuan untuk environment dan Deno OS/arsitektur yang benar. Jangan memakai environment/binary Linux di Windows/macOS.
+3. Pasang Python standar 3.11–3.14 dan FFmpeg/FFprobe sesuai PANDUAN.md. Jalankan setup pada perangkat tujuan untuk environment dan Deno OS/arsitektur yang benar. Jangan memakai environment/binary Linux di Windows/macOS.
 4. Jalur dalam job dan arsip bersifat absolut. Bila akar media berubah, jalankan `rebase-media` di bawah sebelum resume.
 5. Login ulang Firefox pada perangkat tujuan. Rebase mengosongkan pilihan profil lama dalam job/settings yang dimigrasikan. Jangan menyalin cookie/profil sebagai bagian rilis. Untuk sumber yang tidak membutuhkan login, browser tidak diperlukan; jika perlu, gunakan `--browser firefox` pada perangkat tujuan.
 
@@ -80,7 +80,7 @@ cd "$HOME\tools\youtube-downloader"
 .\youtube-downloader.cmd status
 ```
 
-Updater membuat cadangan file program di `.state/program-backups/`, mengganti program, lalu memeriksa dependensi. Gagal pemasangan memicu pemulihan program. Settings, job, database, dan media tidak diganti oleh update/rollback.
+Updater membuat cadangan file program di `.state/program-backups/`, mengganti program, lalu memeriksa dependensi. Gagal pemasangan memicu pemulihan program. Bila proses mati di tengah pemasangan (listrik padam, jendela ditutup paksa), update berikutnya berhenti dengan pesan; jalankan `rollback` untuk memulihkan program dari cadangan pemasangan yang terhenti itu, lalu ulangi update. File program yang ada di rilis lama tetapi tidak ada di rilis baru ikut dihapus dan tetap ada di cadangan, jadi rollback mengembalikannya. Settings, job, database, dan media tidak diganti oleh update/rollback.
 
 ```bash
 bash rollback.sh

@@ -1,6 +1,7 @@
 """Menus and bounded terminal display; no downloader output parsing."""
 
 from contextlib import contextmanager
+import math
 import os
 import sys
 import time
@@ -12,17 +13,117 @@ from rich.padding import Padding
 from rich.progress import Progress, ProgressColumn, TextColumn
 from rich.table import Table, Column
 from rich.text import Text
-from rich.spinner import Spinner
 import questionary
 from prompt_toolkit.output import ColorDepth
-from compat import configure_terminal
+from compat import configure_terminal, stdout_is_console, windows_build
 from model import codec_name
 
-PINK = "#FFC2D4"
-RED = "#E8384F"
-BLUE = "#A8D8F0"
-DIM = "#94A3B8"
-EMPTY = "#334155"
+# Three colours carry the look: pink for what you chose and for success, sky blue for what is
+# going on (labels, the file in progress, hints), red only for what failed. Grey is for
+# secondary text and the empty track of a bar. Each theme has a set tuned for its background: the
+# text colours reach 4.5:1 against PALETTE_GROUND (the tests check it).
+PALETTES = {
+    "dark": {
+        "pink": "#FFC2D4",
+        "blue": "#A8D8F0",
+        "red": "#FF5470",
+        "dim": "#94A3B8",
+        "track": "#334155",
+    },
+    "light": {
+        "pink": "#C9205F",
+        "blue": "#0B6FA4",
+        "red": "#D1122F",
+        "dim": "#566577",
+        "track": "#CBD5E1",
+    },
+}
+PALETTE_GROUND = {"dark": "#1E1E1E", "light": "#EEEEEE"}
+
+
+def detect_theme(environ):
+    """YTDL_THEME=dark or light, or auto (the default). Auto reads COLORFGBG ("fg;bg", set by
+    some terminals): a background of 7 or 15 is a light one. Anything else is taken as dark."""
+    choice = (environ.get("YTDL_THEME") or "auto").strip().lower()
+    if choice in PALETTES:
+        return choice
+    background = (environ.get("COLORFGBG") or "").rpartition(";")[2].strip()
+    return "light" if background in ("7", "15") else "dark"
+
+
+THEME = detect_theme(os.environ)
+PINK, BLUE, RED, DIM, EMPTY = (
+    PALETTES[THEME][name] for name in ("pink", "blue", "red", "dim", "track")
+)
+
+_TERM_COLORS = {"kitty": "256", "256color": "256", "16color": "standard"}
+
+
+def detect_color_system(environ, vt=True, windows=None):
+    """The colour depth of the display, "truecolor", "256" or "standard", from one rule for every
+    system. The display is stderr, so `vt` is whether stderr takes escape sequences.
+
+    POSIX reads COLORTERM and TERM. Windows ignores both: a console with VT processing shows 24
+    bits from build 10.0.15063 on (`windows` is the version tuple), 256 colours before."""
+    if windows is not None:
+        if not vt:
+            return None
+        return "truecolor" if tuple(windows) >= (10, 0, 15063) else "256"
+    if (environ.get("COLORTERM") or "").strip().lower() in ("truecolor", "24bit"):
+        return "truecolor"
+    term = (environ.get("TERM") or "").strip().lower()
+    return _TERM_COLORS.get(term.rpartition("-")[2], "standard")
+
+
+def menus_numbered(plain, windows, stdout_is_console):
+    """Whether menus are numbered lines instead of arrow menus: always in plain output, and on
+    Windows when stdout is not a console (prompt_toolkit draws through the console of stdout).
+    `stdout_is_console` is a function, asked only on Windows."""
+    return bool(plain or (windows and not stdout_is_console()))
+
+
+def motion_enabled(environ, plain):
+    """Animation is part of the live display only: never in plain output, and YTDL_MOTION=off
+    turns it off for anyone who prefers a still screen."""
+    return not plain and (environ.get("YTDL_MOTION") or "auto").strip().lower() not in (
+        "off",
+        "0",
+        "false",
+        "no",
+    )
+
+
+def mix(first, second, weight):
+    """The colour between two #RRGGBB colours; weight 0 is the first, 1 the second."""
+    weight = min(1.0, max(0.0, weight))
+    a, b = (tuple(int(c[i : i + 2], 16) for i in (1, 3, 5)) for c in (first, second))
+    return "#" + "".join(f"{round(x + (y - x) * weight):02X}" for x, y in zip(a, b, strict=True))
+
+
+def pulse(moment, first, second, period=1.6):
+    """A colour that breathes between two over `period` seconds."""
+    return mix(first, second, (1 - math.cos(2 * math.pi * moment / period)) / 2)
+
+
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def spin(moment):
+    return SPINNER[int(moment * 12) % len(SPINNER)]
+
+
+def shimmer(text, moment, base, peak, still=False):
+    """A message with a bright band that sweeps over it, one pass in about two seconds."""
+    line = Text(no_wrap=True, overflow="ellipsis")
+    if still:
+        line.append(text, base)
+        return line
+    reach = 5.0
+    position = (moment * 16) % (len(text) + 2 * reach) - reach
+    for index, char in enumerate(text):
+        line.append(char, mix(base, peak, 1 - abs(index - position) / reach))
+    return line
+
 
 # Redraws per second of every live panel. The worker reports progress only about four times a
 # second; Smoother fills the frames in between, so a higher rate costs no extra events.
@@ -180,6 +281,37 @@ def tidy(path):
     return text
 
 
+class Busy:
+    """One line for work that has no byte counter: a spinner, the message with a light that
+    sweeps over it, a small bar when the number of steps is known, and the time once it takes
+    more than a few seconds. Without motion the same line stands still."""
+
+    SLOW = 3
+
+    def __init__(self, message, motion=True, now=time.monotonic):
+        self.message, self.step = message, None
+        self.motion, self.now = motion, now
+        self.started = now()
+
+    def set(self, message, step=None):
+        self.message, self.step = message, step
+
+    def __rich_console__(self, console, options):
+        moment = self.now() - self.started
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append((spin(moment) if self.motion else "●") + " ", PINK)
+        line.append_text(shimmer(self.message, moment, BLUE, PINK, still=not self.motion))
+        if self.step:
+            done, total = self.step
+            line.append("  ")
+            line.append_text(
+                SolidBar(done, total, PINK).text(min(16, max(4, options.max_width // 4)))
+            )
+        if moment >= self.SLOW:
+            line.append(" · " + duration(moment), DIM)
+        yield line
+
+
 class Cancelled(Exception):
     pass
 
@@ -231,17 +363,29 @@ class UI:
         # stdout that is captured or redirected (the saved paths go there) must not turn a
         # terminal that can draw the panel into plain text.
         self.plain = plain or not vt or not sys.stderr.isatty() or os.environ.get("TERM") == "dumb"
+        # Menus are the one part that also needs stdout on Windows (prompt_toolkit draws through
+        # the console of stdout). Behind a redirected stdout they are numbered lines instead,
+        # and the panel and the colours stay.
+        self.numbered = menus_numbered(self.plain, os.name == "nt", stdout_is_console)
+        self.motion = motion_enabled(os.environ, self.plain)
+        # One decision for Rich and prompt_toolkit alike, the same on every system; both step the
+        # palette down to what the terminal shows, so neither guesses on its own.
+        system = None if self.plain else detect_color_system(os.environ, vt, windows_build())
         self.console = Console(
             stderr=True,
             force_terminal=not self.plain,
             legacy_windows=False,
-            # Detected from COLORTERM/TERM: Rich and prompt_toolkit step the palette down to
-            # 256 or 16 colors by themselves when the terminal cannot show 24-bit color.
-            color_system=None if self.plain else "auto",
+            color_system=system,
             no_color=self.no_color,
             highlight=False,
         )
-        self.depth = ColorDepth.DEPTH_1_BIT if self.no_color else None
+        self.depth = (
+            ColorDepth.DEPTH_1_BIT
+            if self.no_color
+            else {"truecolor": ColorDepth.DEPTH_24_BIT, "256": ColorDepth.DEPTH_8_BIT}.get(
+                system, ColorDepth.DEPTH_4_BIT if system else None
+            )
+        )
         self.glyph = PLAIN_GLYPHS if self.plain else GLYPHS
         self._reported_log = None
         self.style = (
@@ -273,10 +417,27 @@ class UI:
         else:
             self.console.print(Text(str(message), style=color, overflow="fold"))
 
-    def banner(self, version):
+    def banner(self, version, animate=False):
+        """The title line. In an interactive run it is typed out with a light on the newest
+        letter; the finished line is what stays on the screen."""
+        title = "YouTube Downloader"
         line = Text()
-        line.append("YouTube Downloader", style=f"bold {PINK}")
+        line.append(title, style=f"bold {PINK}")
         line.append("  " + version, style=DIM)
+        if animate and self.motion and not self.numbered:
+            with Live(
+                console=self.console,
+                transient=True,
+                refresh_per_second=FPS,
+                redirect_stdout=False,
+                redirect_stderr=False,
+            ) as live:
+                for shown in range(1, len(title) + 1):
+                    typed = Text(no_wrap=True)
+                    typed.append(title[: shown - 1], style=f"bold {PINK}")
+                    typed.append(title[shown - 1], style=f"bold {BLUE}")
+                    live.update(typed, refresh=True)
+                    time.sleep(0.022)
         self.say(line)
 
     def error(self, message, log=None, command=None):
@@ -340,25 +501,23 @@ class UI:
 
     @contextmanager
     def activity(self, message):
-        """A spinner while work runs. It yields update(text) to change the message."""
+        """Work with no byte counter (fetching metadata, checking for a release). It yields
+        update(text, step=None): a new message and, when the number of steps is known, the pair
+        (done, total) that draws a small bar. Plain output prints each message as a line."""
         if self.plain:
             self.say(message)
-            yield self.say
+            yield lambda text, step=None: self.say(text)
             return
-        spinner = Spinner("dots", text=Text(message, style=BLUE), style=PINK)
-
-        def update(text):
-            spinner.update(text=Text(text, style=BLUE))
-
+        busy = Busy(message, self.motion)
         with Live(
-            spinner,
+            busy,
             console=self.console,
             transient=True,
-            refresh_per_second=FPS,
+            refresh_per_second=FPS if self.motion else 4,
             redirect_stdout=False,
             redirect_stderr=False,
         ):
-            yield update
+            yield busy.set
 
     def card(self, item, root):
         """A single finished video as a card: title, what it is, and where it is."""
@@ -492,6 +651,14 @@ class UI:
         return result
 
     @staticmethod
+    def _read():
+        """One typed line. Ctrl+D (end of input) cancels, the same as q."""
+        try:
+            return input().strip()
+        except EOFError:
+            raise Cancelled() from None
+
+    @staticmethod
     def _index(options, value):
         for index, (_, candidate) in enumerate(options):
             if candidate == value and type(candidate) is type(value):
@@ -504,13 +671,13 @@ class UI:
                 "Menu membutuhkan input terminal. Gunakan terminal interaktif atau resume ID_JOB."
             )
         label = label or title
-        if self.plain:
+        if self.numbered:
             self.say(self._message(title, step), BLUE)
             for i, (text, _) in enumerate(options, 1):
                 self.say(f"{i}. {text}")
             while True:
                 self.say("Nomor pilihan (q untuk batal):")
-                answer = input().strip()
+                answer = self._read()
                 if answer.lower() == "q":
                     raise Cancelled()
                 if answer.isdigit() and 1 <= int(answer) <= len(options):
@@ -538,9 +705,9 @@ class UI:
     def text(self, title, default="", step=None, label=None):
         if not sys.stdin.isatty():
             raise ValueError("Masukkan link melalui terminal interaktif.")
-        if self.plain:
+        if self.numbered:
             self.say(self._message(title, step), BLUE)
-            return input().strip() or default
+            return self._read() or default
         result = self._ask(
             questionary.text(
                 self._message(title, step),
@@ -554,16 +721,22 @@ class UI:
         return result
 
     def checkboxes(self, title, options, checked=()):
-        if self.plain:
+        if self.numbered:
             self.say(title, BLUE)
-            for i, (text, _) in enumerate(options, 1):
-                self.say(f"{i}. {text}")
+            kept = [value for _, value in options if value in checked]
+            for i, (text, value) in enumerate(options, 1):
+                self.say(f"{i}. {'[x] ' if value in kept else ''}{text}")
             from model import item_indices
 
+            hint = "Nomor/rentang, all, atau none untuk tidak memilih"
+            if kept:
+                hint += "; Enter tanpa mengetik: tetap ([x])"
             while True:
-                answer = self.text("Nomor/rentang, all, atau none untuk tidak memilih:")
+                answer = self.text(hint + ":")
                 if answer == "none":
                     return []
+                if not answer and kept:
+                    return kept
                 try:
                     return [options[i][1] for i in item_indices(answer, len(options))]
                 except ValueError as exc:
@@ -633,7 +806,7 @@ class Session:
         self.oid = self.overall.add_task("", total=total)
         self.file = Progress(
             TextColumn("File"),
-            SolidBarColumn(RED, self.clock, self.smoother.value),
+            SolidBarColumn(BLUE, self.clock, self.smoother.value),
             TextColumn("{task.fields[label]}"),
             expand=True,
         )
@@ -802,6 +975,13 @@ class Session:
         if self.ui.plain:
             self.ui.say(f"Item {self.done}/{self.total} · {status}")
 
+    def tint(self, kind):
+        """The glyph colour of a row or stage. The one in progress breathes between sky blue and
+        pink while there is motion."""
+        if kind == "active" and self.ui.motion:
+            return pulse(self.now(), BLUE, PINK)
+        return ROW_COLORS[kind]
+
     def window(self, height):
         """The playlist rows around the current item: one finished item above it, the rest below.
 
@@ -819,7 +999,7 @@ class Session:
         for index in range(start, min(len(titles), start + room)):
             kind = kinds[index]
             row = Text(no_wrap=True, overflow="ellipsis")
-            row.append("  " + glyph[kind] + " ", ROW_COLORS[kind])
+            row.append("  " + glyph[kind] + " ", self.tint(kind))
             row.append(str(index + 1).rjust(digits) + " ", DIM)
             row.append(titles[index], ROW_TITLES[kind])
             rows.append(row)
@@ -848,7 +1028,7 @@ class Session:
                 for line in (full, short):
                     line.append(" " + glyph["arrow"] + " ", DIM)
             for line, shown in ((full, True), (short, kind in ("active", "fail"))):
-                line.append(glyph[kind], ROW_COLORS[kind])
+                line.append(glyph[kind], self.tint(kind))
                 if shown:
                     line.append(" " + label, ROW_TITLES[kind])
         return full if full.cell_len <= width else short
@@ -898,9 +1078,13 @@ class Session:
                     overflow="ellipsis",
                 )
             )
+        working = self.ui.motion and bool(stages) and self.pipeline[2] == "run"
         rows.append(
             Text(
-                "Status " + status + (f" · berjalan {elapsed}" if self.single else ""),
+                "Status "
+                + (spin(self.now()) + " " if working and "GAGAL" not in status else "")
+                + status
+                + (f" · berjalan {elapsed}" if self.single else ""),
                 style=RED if "GAGAL" in status else DIM,
                 no_wrap=True,
                 overflow="ellipsis",
@@ -909,6 +1093,22 @@ class Session:
         if not self.single:
             rows.append(Text("Durasi " + elapsed, style=DIM))
         yield Group(*rows)
+
+    def settle(self):
+        """A short flourish when a batch finishes without a failure: a ring that fills in pink and
+        closes into the check mark that the final line shows. It lasts about a third of a second."""
+        frames = ("◌", "◔", "◑", "◕", "●")
+        with Live(
+            console=self.ui.console,
+            transient=True,
+            refresh_per_second=FPS,
+            redirect_stdout=False,
+            redirect_stderr=False,
+        ) as live:
+            for index, frame in enumerate(frames):
+                tone = mix(BLUE, PINK, index / (len(frames) - 1))
+                live.update(Text(frame + " Menyelesaikan", style=tone), refresh=True)
+                time.sleep(0.07)
 
     def __exit__(self, exc_type, exc, tb):
         self.clock.active(False)
@@ -927,6 +1127,8 @@ class Session:
         )
         line = Text()
         if not self.ui.plain:
+            if glyph == "ok" and self.live and self.ui.motion:
+                self.settle()
             line.append(self.ui.glyph[glyph] + " ", style=color)
         elapsed = duration(time.monotonic() - self.started)
         line.append(
