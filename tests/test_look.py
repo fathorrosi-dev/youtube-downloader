@@ -414,22 +414,36 @@ class WindowsConsole(unittest.TestCase):
             self.assertFalse(compat.stdout_is_console(windows=False))
 
     def test_the_ui_reports_the_display_not_stdout(self):
-        def build(**kw):
+        def build(windows=None, vt=True, console=False):
+            # `windows` is the Windows version tuple or None; `console` is whether stdout is a
+            # console. Both are set here, so the same test checks every rule on every system.
             fake = io.StringIO()
             fake.isatty = lambda: True
             env = {"TERM": "xterm-256color"}
             with (
                 patch.dict(os.environ, env, clear=True),
-                patch.object(ui, "configure_terminal", return_value=kw.get("vt", True)),
+                patch.object(ui, "configure_terminal", return_value=vt),
+                patch.object(ui, "windows_build", return_value=windows),
+                patch.object(ui, "stdout_is_console", return_value=console),
                 patch.object(ui.sys, "stderr", fake),
                 patch.object(ui.sys.stdout, "isatty", return_value=False, create=True),
             ):
                 return ui.UI(False)
 
+        # POSIX: stdout does not matter; only Windows draws menus through it.
         redirected = build()
         self.assertFalse(redirected.plain)
-        self.assertFalse(redirected.numbered)  # POSIX: only Windows draws menus through stdout
+        self.assertFalse(redirected.numbered)
         self.assertTrue(build(vt=False).plain)
+        # Windows: a redirected stdout keeps the panel and the colours, and numbers the menus.
+        modern = (10, 0, 19045)
+        redirected = build(windows=modern)
+        self.assertFalse(redirected.plain)
+        self.assertTrue(redirected.numbered)
+        self.assertFalse(build(windows=modern, console=True).numbered)
+        screen = build(windows=modern, vt=False)
+        self.assertTrue(screen.plain)
+        self.assertTrue(screen.numbered)
 
 
 @unittest.skipIf(os.name == "nt", "ConPTY and Ctrl+D behave differently; see the Windows tests")

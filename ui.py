@@ -366,11 +366,12 @@ class UI:
         # Menus are the one part that also needs stdout on Windows (prompt_toolkit draws through
         # the console of stdout). Behind a redirected stdout they are numbered lines instead,
         # and the panel and the colours stay.
-        self.numbered = menus_numbered(self.plain, os.name == "nt", stdout_is_console)
+        windows = windows_build()  # None on every other system; the tests set it to try Windows
+        self.numbered = menus_numbered(self.plain, windows is not None, stdout_is_console)
         self.motion = motion_enabled(os.environ, self.plain)
         # One decision for Rich and prompt_toolkit alike, the same on every system; both step the
         # palette down to what the terminal shows, so neither guesses on its own.
-        system = None if self.plain else detect_color_system(os.environ, vt, windows_build())
+        system = None if self.plain else detect_color_system(os.environ, vt, windows)
         self.console = Console(
             stderr=True,
             force_terminal=not self.plain,

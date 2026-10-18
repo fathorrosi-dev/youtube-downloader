@@ -430,15 +430,22 @@ class Stopping(unittest.TestCase):
             self.assertNotIn("yt-dlp", app.stop_message("system"))
 
     def test_the_resume_command_works_from_anywhere(self):
+        # The start command is ./youtube-downloader on POSIX and .\youtube-downloader.cmd on
+        # Windows. launcher(windows) lets one run check both; resume_command uses this system's.
+        here = ".\\youtube-downloader.cmd" if os.name == "nt" else "./youtube-downloader"
         with patch.object(app.os, "getcwd", return_value=str(app.BASE)):
-            self.assertEqual(app.resume_command("abc123"), "./youtube-downloader resume abc123")
+            self.assertEqual(app.launcher(windows=False), "./youtube-downloader")
+            self.assertEqual(app.launcher(windows=True), ".\\youtube-downloader.cmd")
+            self.assertEqual(app.resume_command("abc123"), f"{here} resume abc123")
             self.assertEqual(
                 app.resume_command("abc123", login=True),
-                "./youtube-downloader resume abc123 --browser firefox",
+                f"{here} resume abc123 --browser firefox",
             )
         with tempfile.TemporaryDirectory() as elsewhere:
             with patch.object(app.os, "getcwd", return_value=elsewhere):
                 command = app.resume_command("abc123")
+                for windows in (False, True):
+                    self.assertIn(str(app.BASE), app.launcher(windows=windows))
         self.assertTrue(command.endswith(" resume abc123"))
         self.assertIn(str(app.BASE), command)
 

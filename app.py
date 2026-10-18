@@ -91,13 +91,15 @@ FLAGS = {
 SUBTITLE_ORDER = ("manual", "automatic", "translated")
 
 
-def launcher():
-    """The command that starts this tool, written so it works from wherever it is pasted."""
-    name = "youtube-downloader.cmd" if os.name == "nt" else "youtube-downloader"
+def launcher(windows=None):
+    """The command that starts this tool, written so it works from wherever it is pasted.
+    `windows` is for the tests; by default it is whether this is Windows."""
+    windows = os.name == "nt" if windows is None else windows
+    name = "youtube-downloader.cmd" if windows else "youtube-downloader"
     if os.path.samefile(os.getcwd(), BASE):
-        return (".\\" if os.name == "nt" else "./") + name
+        return (".\\" if windows else "./") + name
     path = str(BASE / name)
-    return subprocess.list2cmdline([path]) if os.name == "nt" else shlex.quote(path)
+    return subprocess.list2cmdline([path]) if windows else shlex.quote(path)
 
 
 def resume_command(job_id, login=False):

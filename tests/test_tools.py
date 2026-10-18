@@ -775,6 +775,7 @@ class Display(unittest.TestCase):
         self.assertLessEqual(len(beats), 3 * 2 * 10)
         self.assertLess(len(lines), 100)
 
+    @unittest.skipIf(os.name == "nt", "Windows takes no hint from TERM; see the next test")
     def test_color_depth_follows_the_terminal(self):
         # No COLORTERM and a 256-color TERM: the palette steps down to the 256-color table
         # instead of sending 24-bit sequences the terminal would show wrongly.
@@ -787,6 +788,15 @@ class Display(unittest.TestCase):
         self.assertNotIn("\x1b[38;2;", out)
         self.assertNotIn("\x1b[38;5;", out)
         self.assertRegex(out, r"\x1b\[(?:[0-9];)*(?:3[0-7]|9[0-7])m")
+
+    @unittest.skipUnless(os.name == "nt", "the Windows rule, in a real console")
+    def test_a_windows_console_shows_24_bits_whatever_the_environment_says(self):
+        if sys.getwindowsversion().build < 15063:
+            self.skipTest("older than the first Windows build with 24-bit console colour")
+        for extra in ({"COLORTERM": ""}, {"COLORTERM": "", "TERM": "xterm"}):
+            out = self.tty(extra=extra)
+            self.assertIn("\x1b[38;2;", out)
+            self.assertIn("█", out)
 
     def test_an_empty_no_color_leaves_the_colors_on(self):
         out = self.tty(extra={"NO_COLOR": ""})
@@ -1290,13 +1300,16 @@ class Presentation(unittest.TestCase):
         self.assertIn("    ./youtube-downloader resume abc", buffer.getvalue())
 
     def test_the_display_follows_stderr_and_the_environment(self):
-        def build(stderr_is_tty, **environment):
+        def build(stderr_is_tty, windows=None, vt=True, **environment):
+            # `windows` is the Windows version tuple, or None for every other system: the rule
+            # that applies is the one asked for, whichever system runs this test.
             fake = io.StringIO()
             fake.isatty = lambda: stderr_is_tty
             env = {"TERM": "xterm-256color", **environment}
             with (
                 patch.dict(os.environ, env, clear=True),
-                patch.object(ui, "configure_terminal", return_value=True),
+                patch.object(ui, "configure_terminal", return_value=vt),
+                patch.object(ui, "windows_build", return_value=windows),
                 patch.object(ui.sys, "stderr", fake),
                 # stdout is captured or redirected, as it is when the saved paths are collected.
                 patch.object(ui.sys.stdout, "isatty", return_value=False, create=True),
@@ -1316,6 +1329,18 @@ class Presentation(unittest.TestCase):
         self.assertEqual(build(True, COLORTERM="truecolor").console.color_system, "truecolor")
         self.assertEqual(build(True).console.color_system, "256")
         self.assertEqual(build(True, TERM="xterm").console.color_system, "standard")
+        # Windows takes no hint from TERM or COLORTERM: the console shows 24 bits from build
+        # 10.0.15063 on and 256 colours before, and VT processing decides whether it is a display.
+        modern, old = (10, 0, 19045), (10, 0, 14393)
+        for term in ("xterm", "xterm-256color"):
+            screen = build(True, windows=modern, TERM=term)
+            self.assertEqual(screen.console.color_system, "truecolor")
+            self.assertIs(screen.depth, ui.ColorDepth.DEPTH_24_BIT)
+            screen = build(True, windows=old, TERM=term, COLORTERM="truecolor")
+            self.assertEqual(screen.console.color_system, "256")
+            self.assertIs(screen.depth, ui.ColorDepth.DEPTH_8_BIT)
+        self.assertTrue(build(True, windows=modern, vt=False).plain)
+        self.assertIs(build(True, windows=modern, NO_COLOR="1").depth, ui.ColorDepth.DEPTH_1_BIT)
 
     def test_activity_updates_its_message_in_both_modes(self):
         with redirect_stderr(io.StringIO()) as captured:
