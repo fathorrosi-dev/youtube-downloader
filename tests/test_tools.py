@@ -1329,6 +1329,11 @@ class Presentation(unittest.TestCase):
         self.assertEqual(build(True, COLORTERM="truecolor").console.color_system, "truecolor")
         self.assertEqual(build(True).console.color_system, "256")
         self.assertEqual(build(True, TERM="xterm").console.color_system, "standard")
+        # A gradient needs 256 colours; a basic terminal gets the flat bar with a warm head.
+        self.assertTrue(build(True, COLORTERM="truecolor").gradient)
+        self.assertTrue(build(True).gradient)
+        self.assertFalse(build(True, TERM="xterm").gradient)
+        self.assertFalse(build(False).gradient)
         # Windows takes no hint from TERM or COLORTERM: the console shows 24 bits from build
         # 10.0.15063 on and 256 colours before, and VT processing decides whether it is a display.
         modern, old = (10, 0, 19045), (10, 0, 14393)
@@ -1336,6 +1341,7 @@ class Presentation(unittest.TestCase):
             screen = build(True, windows=modern, TERM=term)
             self.assertEqual(screen.console.color_system, "truecolor")
             self.assertIs(screen.depth, ui.ColorDepth.DEPTH_24_BIT)
+            self.assertTrue(screen.gradient)
             screen = build(True, windows=old, TERM=term, COLORTERM="truecolor")
             self.assertEqual(screen.console.color_system, "256")
             self.assertIs(screen.depth, ui.ColorDepth.DEPTH_8_BIT)

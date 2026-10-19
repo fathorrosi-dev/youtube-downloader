@@ -1,6 +1,8 @@
 """Menus and bounded terminal display; no downloader output parsing."""
 
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from itertools import groupby
 import math
 import os
 import sys
@@ -19,9 +21,15 @@ from compat import configure_terminal, stdout_is_console, windows_build
 from model import codec_name
 
 # Three colours carry the look: pink for what you chose and for success, sky blue for what is
-# going on (labels, the file in progress, hints), red only for what failed. Grey is for
-# secondary text and the empty track of a bar. Each theme has a set tuned for its background: the
-# text colours reach 4.5:1 against PALETTE_GROUND (the tests check it).
+# going on (labels, the item bar, hints), red only for what failed. Grey is for secondary text and
+# the empty track of a bar. Each theme has a set tuned for its background: the text colours reach
+# 4.5:1 against PALETTE_GROUND, and the bar colours 3:1, the least for something that is not text
+# (the tests check both).
+#
+# The file bar is the one place that mixes colours: it is pink at its tail and warms to a scarlet of
+# its own (bar_red) at its leading edge. That scarlet is a different shade from the red of a
+# failure on purpose, so a running bar is never mistaken for a failed one. bar_pink is the pink
+# the bar starts from: in the light theme the text pink is too dark to read as pink in a bar.
 PALETTES = {
     "dark": {
         "pink": "#FFC2D4",
@@ -29,6 +37,8 @@ PALETTES = {
         "red": "#FF5470",
         "dim": "#94A3B8",
         "track": "#334155",
+        "bar_pink": "#FFC2D4",
+        "bar_red": "#FF4433",
     },
     "light": {
         "pink": "#C9205F",
@@ -36,6 +46,8 @@ PALETTES = {
         "red": "#D1122F",
         "dim": "#566577",
         "track": "#CBD5E1",
+        "bar_pink": "#CC3D7B",
+        "bar_red": "#D6361F",
     },
 }
 PALETTE_GROUND = {"dark": "#1E1E1E", "light": "#EEEEEE"}
@@ -52,8 +64,8 @@ def detect_theme(environ):
 
 
 THEME = detect_theme(os.environ)
-PINK, BLUE, RED, DIM, EMPTY = (
-    PALETTES[THEME][name] for name in ("pink", "blue", "red", "dim", "track")
+PINK, BLUE, RED, DIM, EMPTY, BAR_PINK, BAR_RED = (
+    PALETTES[THEME][name] for name in ("pink", "blue", "red", "dim", "track", "bar_pink", "bar_red")
 )
 
 _TERM_COLORS = {"kitty": "256", "256color": "256", "16color": "standard"}
@@ -153,6 +165,10 @@ class AnimationClock:
             time.monotonic() - self.resumed_at if self.resumed_at is not None else 0
         )
 
+    @property
+    def running(self):
+        return self.resumed_at is not None
+
     def active(self, value, reset=False):
         self.elapsed = 0.0 if reset else self()
         self.resumed_at = time.monotonic() if value else None
@@ -194,12 +210,51 @@ class Smoother:
         self.state = (0.0, 0.0, self.now(), 0.0)
 
 
+# The fill of the file bar breathes between its two colours once in BREATH_PERIOD seconds, and the
+# tail of the fill gets BREATH_DEPTH of the way to the head colour at the top of a breath (the
+# head is already there). Below 1 the gradient never goes away, even at the top of a breath.
+BREATH_PERIOD = 1.6
+BREATH_DEPTH = 0.6
+# The gradient is spread over at least this many cells. A bar that has just begun is then still
+# mostly its own colour, instead of one red cell that turns pink as soon as a second one appears.
+HEAT_RAMP = 8
+
+
+@dataclass(frozen=True)
+class Heat:
+    """A bar that warms from its own colour at the tail to `head` at its leading edge.
+
+    `smooth` is a true gradient, for terminals with 256 or more colours. Without it (16 colours,
+    where a gradient would fall into a few unrelated colours) only the last two cells take the
+    head colour. `breathe` makes the whole fill pulse toward the head colour and back."""
+
+    head: str
+    smooth: bool = True
+    breathe: bool = False
+
+
+def heat_colors(count, tail, heat, moment=None):
+    """The colour of each of the `count` filled cells, tail first.
+
+    The cells are spread between the tail colour and the head colour, so the leading cell is the
+    warmest; it is the head colour itself once the bar is HEAT_RAMP + 1 cells long. With a `moment`
+    (seconds) and a breathing `heat`, the fill also swells toward the head colour and back, so the
+    gradient moves as a whole instead of travelling along the bar."""
+    if not heat.smooth:
+        return [heat.head if index >= max(count - 2, 2) else tail for index in range(count)]
+    swell = 0.0
+    if heat.breathe and moment is not None:
+        swell = BREATH_DEPTH * (1 - math.cos(2 * math.pi * moment / BREATH_PERIOD)) / 2
+    reach = max(count - 1, HEAT_RAMP)
+    return [mix(tail, heat.head, (i / reach) + (1 - i / reach) * swell) for i in range(count)]
+
+
 class SolidBar:
     """A one-cell-high bar measured against the space Rich allocates to it."""
 
-    def __init__(self, completed, total, color, animation_time=0, indicator=False):
+    def __init__(self, completed, total, color, animation_time=0, indicator=False, heat=None):
         self.completed, self.total, self.color = completed, total, color
-        self.animation_time, self.indicator = animation_time, indicator
+        self.animation_time, self.indicator, self.heat = animation_time, indicator, heat
 
     def text(self, width):
         width = max(0, width)
@@ -210,17 +265,28 @@ class SolidBar:
             step = int(self.animation_time * BAR_STEPS_PER_SECOND) % (2 * travel) if travel else 0
             start = min(step, 2 * travel - step) if travel else 0
             bar.append("░" * start, EMPTY)
-            bar.append("█" * count, self.color)
+            cells = [self.color] * count
+            if self.heat and count == 3:
+                cells[1] = self.heat.head  # the block is lit from its centre
+            for cell in cells:
+                bar.append("█", cell)
             bar.append("░" * (width - start - count), EMPTY)
             return bar
         ratio = min(1.0, max(0.0, self.completed / self.total)) if self.total > 0 else 0
         eighths = int(ratio * width * 8)
         full, fraction = divmod(eighths, 8)
-        bar.append("█" * full, self.color)
+        cells = full + bool(fraction)
+        colors = (
+            heat_colors(cells, self.color, self.heat, self.animation_time)
+            if self.heat
+            else [self.color] * cells
+        )
+        for color, run in groupby(colors[:full]):
+            bar.append("█" * len(list(run)), color)
         if fraction:
             # A dark background keeps the fractional cell aligned with the track.
-            bar.append("▏▎▍▌▋▊▉"[fraction - 1], f"{self.color} on {EMPTY}")
-        bar.append("░" * (width - full - bool(fraction)), EMPTY)
+            bar.append("▏▎▍▌▋▊▉"[fraction - 1], f"{colors[-1]} on {EMPTY}")
+        bar.append("░" * (width - cells), EMPTY)
         return bar
 
     def __rich_measure__(self, console, options):
@@ -231,19 +297,27 @@ class SolidBar:
 
 
 class SolidBarColumn(ProgressColumn):
-    """`value` replaces the task's own counter, e.g. with Smoother.value for the file bar."""
+    """`value` replaces the task's own counter, e.g. with Smoother.value for the file bar.
 
-    def __init__(self, color, clock=None, value=None):
+    A `heat` that breathes does so only while the clock runs, that is, while bytes arrive. A bar
+    that waits, merges, or has failed rests on its plain gradient instead of freezing at some
+    point of a breath."""
+
+    def __init__(self, color, clock=None, value=None, heat=None):
         super().__init__(table_column=Column(ratio=1, no_wrap=True))
-        self.color, self.clock, self.value = color, clock, value
+        self.color, self.clock, self.value, self.heat = color, clock, value, heat
 
     def render(self, task):
+        heat = self.heat
+        if heat and heat.breathe and not (self.clock and self.clock.running):
+            heat = replace(heat, breathe=False)
         return SolidBar(
             task.completed if self.value is None else self.value(),
             task.total,
             self.color,
             self.clock() if self.clock else 0,
             task.fields.get("indicator", False),
+            heat,
         )
 
 
@@ -380,6 +454,8 @@ class UI:
             no_color=self.no_color,
             highlight=False,
         )
+        # A gradient needs more than the 16 colours of a basic terminal to look like one.
+        self.gradient = system in ("truecolor", "256")
         self.depth = (
             ColorDepth.DEPTH_1_BIT
             if self.no_color
@@ -798,16 +874,19 @@ class Session:
         self.speed = 0
         self.eta = None
         self.until = None
+        # The item bar is sky blue. The file bar is pink at its tail and warms to scarlet at the
+        # head; it breathes while bytes arrive, when the terminal can show it and motion is on.
+        heat = Heat(BAR_RED, smooth=ui.gradient, breathe=ui.gradient and ui.motion)
         self.overall = Progress(
             TextColumn("Item"),
-            SolidBarColumn(PINK),
+            SolidBarColumn(BLUE),
             TextColumn("{task.percentage:.0f}% · {task.completed:.0f}/{task.total:.0f}"),
             expand=True,
         )
         self.oid = self.overall.add_task("", total=total)
         self.file = Progress(
             TextColumn("File"),
-            SolidBarColumn(BLUE, self.clock, self.smoother.value),
+            SolidBarColumn(BAR_PINK, self.clock, self.smoother.value, heat),
             TextColumn("{task.fields[label]}"),
             expand=True,
         )

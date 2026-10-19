@@ -5,7 +5,7 @@ CLI Python untuk video YouTube, Shorts, dan playlist: pilihan resolusi asli + au
 - Ubuntu 24.04+ x64, Windows 11 x64 native, macOS 15+ Intel/Apple Silicon.
 - Python standar 3.11–3.14; 3.13 direkomendasikan (3.10 sudah EOL sejak 1 Oktober 2026).
 - FFmpeg/FFprobe dari PATH, Deno 2.9.6 lokal dengan checksum dipatok.
-- Panel progres blok padat yang bergerak halus (12 fps) dengan animasi (spinner, denyut warna, banner), tiga warna (pink, sky blue, merah untuk kegagalan) dalam set gelap dan terang, tahap tiap video, daftar item playlist, menu panah/Space/Enter, mode plain, `NO_COLOR`, `YTDL_THEME`, dan `YTDL_MOTION=off`.
+- Panel progres blok padat yang bergerak halus (12 fps) dengan animasi (spinner, denyut warna, banner), tiga warna (pink, sky blue, merah untuk kegagalan) dalam set gelap dan terang, bar item sky blue dan bar file pink yang menghangat ke scarlet, tahap tiap video, daftar item playlist, menu panah/Space/Enter, mode plain, `NO_COLOR`, `YTDL_THEME`, dan `YTDL_MOTION=off`.
 - Resume (`resume` memilih job, `resume --last`), arsip varian, self-update rilis stabil dengan backup/rollback, migrasi jalur lintas OS.
 - Mode skrip: semua pertanyaan wizard punya flag, `--yes` berjalan tanpa terminal, `--links-file` untuk banyak link, path hasil ke stdout, `status --json`.
 - `status` menampilkan umur yt-dlp dan ukuran `.state`; `clean` membersihkan sisa dengan aman, `clean --abandoned` juga folder sementara job yang ditinggalkan.

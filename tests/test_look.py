@@ -9,6 +9,7 @@ import sys
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 BASE = Path(__file__).resolve().parents[1]
@@ -35,6 +36,13 @@ def contrast(first, second):
 
 def rgb(color):
     return ";".join(str(int(color[i : i + 2], 16)) for i in (1, 3, 5))
+
+
+def distance(first, second):
+    """How far apart two #RRGGBB colours are, as the length of the step between them in RGB."""
+    return (
+        sum((int(first[i : i + 2], 16) - int(second[i : i + 2], 16)) ** 2 for i in (1, 3, 5)) ** 0.5
+    )
 
 
 class ColourRules(unittest.TestCase):
@@ -85,6 +93,24 @@ class ColourRules(unittest.TestCase):
             for name in ("pink", "blue", "red", "dim"):
                 ratio = contrast(palette[name], ground)
                 self.assertGreaterEqual(ratio, 4.5, f"{theme} {name} {palette[name]}: {ratio:.2f}")
+
+    def test_the_bar_colours_read_as_graphics_and_stay_apart(self):
+        # A bar is not text: it needs 3:1 against the background and against its own track. The
+        # gradient needs its two ends far enough apart to be seen, and the red of the bar is a
+        # shade of its own, so that a bar at work is never taken for the red of a failure.
+        for theme, palette in ui.PALETTES.items():
+            ground = ui.PALETTE_GROUND[theme]
+            for name in ("bar_pink", "bar_red"):
+                for other in (ground, palette["track"]):
+                    ratio = contrast(palette[name], other)
+                    self.assertGreaterEqual(ratio, 3.0, f"{theme} {name} on {other}: {ratio:.2f}")
+            self.assertGreaterEqual(distance(palette["bar_pink"], palette["bar_red"]), 90, theme)
+            self.assertGreaterEqual(distance(palette["bar_red"], palette["red"]), 35, theme)
+            self.assertNotEqual(palette["bar_red"], palette["red"])
+            red, green, blue = (int(palette["bar_pink"][i : i + 2], 16) for i in (1, 3, 5))
+            self.assertTrue(red > green and blue > green, f"{theme} bar_pink is pink")
+            red, green, blue = (int(palette["bar_red"][i : i + 2], 16) for i in (1, 3, 5))
+            self.assertGreater(red, 2 * max(green, blue) * 0.9, f"{theme} bar_red is red")
 
     def test_the_two_themes_define_the_same_roles(self):
         self.assertEqual(set(ui.PALETTES["dark"]), set(ui.PALETTES["light"]))
@@ -152,10 +178,22 @@ class Roles(unittest.TestCase):
         session.event({"type": "progress", "downloaded": 40, "total": 100, "speed": 10})
         return session
 
-    def test_the_active_download_bar_is_sky_blue_and_not_red(self):
+    def test_the_file_bar_is_pink_and_warms_to_a_red_that_is_not_the_failure_red(self):
         out = render(self.session())
-        self.assertIn("\x1b[38;2;" + rgb(ui.BLUE) + "m", out)
+        # BLUE is the labels and the stage; the red of a failure is nowhere while all goes well.
+        for color in (ui.BAR_PINK, ui.BAR_RED, ui.BLUE):
+            self.assertIn("\x1b[38;2;" + rgb(color) + "m", out)
         self.assertNotIn("\x1b[38;2;" + rgb(ui.RED) + "m", out)
+
+    def test_the_item_bar_is_sky_blue(self):
+        screen = ui.UI(True)
+        screen.plain = False
+        screen.glyph = ui.GLYPHS
+        session = ui.Session(screen, 4)
+        session.overall.update(session.oid, completed=2)
+        bar = session.overall.columns[1].render(session.overall.tasks[0]).text(20)
+        self.assertEqual(bar.plain, "█" * 10 + "░" * 10)
+        self.assertEqual({span.style for span in bar.spans}, {ui.BLUE, ui.EMPTY})
 
     def test_red_appears_only_when_something_failed(self):
         session = self.session()
@@ -170,6 +208,107 @@ class Roles(unittest.TestCase):
         session.item_start(("metadata", "finish"))
         session.item_end("complete")
         self.assertIn("\x1b[38;2;" + rgb(ui.PINK) + "m", render(session))
+
+
+class Warming(unittest.TestCase):
+    """The file bar: pink at its tail, warming to the head colour at its leading edge, and
+    breathing while bytes arrive. These use plain black and red so the arithmetic can be read."""
+
+    tail, head = "#000000", "#FF0000"
+
+    def reds(self, colors):
+        return [int(color[1:3], 16) for color in colors]
+
+    def test_a_gradient_runs_from_the_tail_colour_to_the_head_colour(self):
+        colors = ui.heat_colors(12, self.tail, ui.Heat(self.head))
+        reds = self.reds(colors)
+        self.assertEqual((colors[0], colors[-1]), (self.tail, self.head))
+        self.assertEqual(reds, sorted(set(reds)))  # every cell a little warmer than the last
+
+    def test_a_short_bar_is_mostly_its_own_colour_and_its_cells_keep_their_colour(self):
+        heat = ui.Heat(self.head)
+        self.assertEqual(ui.heat_colors(0, self.tail, heat), [])
+        self.assertEqual(ui.heat_colors(1, self.tail, heat), [self.tail])
+        grown = ui.heat_colors(ui.HEAT_RAMP + 1, self.tail, heat)
+        # Within the ramp a longer bar only adds cells: none of them changes colour.
+        for count in range(1, ui.HEAT_RAMP + 1):
+            self.assertEqual(ui.heat_colors(count, self.tail, heat), grown[:count])
+        self.assertNotEqual(grown[ui.HEAT_RAMP - 1], self.head)
+        self.assertEqual(grown[-1], self.head)  # the head colour itself once the ramp is full
+
+    def test_the_fill_breathes_toward_the_head_colour_and_back(self):
+        heat, breathing = ui.Heat(self.head), ui.Heat(self.head, True, True)
+        rest = ui.heat_colors(12, self.tail, heat)
+        self.assertEqual(ui.heat_colors(12, self.tail, breathing, 0), rest)
+        self.assertEqual(ui.heat_colors(12, self.tail, breathing, ui.BREATH_PERIOD), rest)
+        top = ui.heat_colors(12, self.tail, breathing, ui.BREATH_PERIOD / 2)
+        self.assertEqual(top[-1], self.head)
+        self.assertEqual(top[0], ui.mix(self.tail, self.head, ui.BREATH_DEPTH))
+        self.assertNotEqual(top[0], top[-1])  # the gradient never disappears
+        # Only a heat that breathes does, whatever the moment.
+        self.assertEqual(ui.heat_colors(12, self.tail, heat, 0.8), rest)
+
+    def test_without_a_gradient_only_the_leading_cells_take_the_head_colour(self):
+        flat, flat_breathing = ui.Heat(self.head, False), ui.Heat(self.head, False, True)
+        self.assertEqual(ui.heat_colors(10, self.tail, flat), [self.tail] * 8 + [self.head] * 2)
+        self.assertEqual(ui.heat_colors(3, self.tail, flat), [self.tail, self.tail, self.head])
+        self.assertEqual(ui.heat_colors(2, self.tail, flat), [self.tail] * 2)
+        # A basic terminal does not get a breath either.
+        self.assertEqual(
+            ui.heat_colors(10, self.tail, flat_breathing, 0.8), [self.tail] * 8 + [self.head] * 2
+        )
+
+    def test_heat_changes_the_colours_of_a_bar_and_never_its_shape(self):
+        heat = ui.Heat(self.head)
+        for completed in (0, 3, 50, 52.5, 99, 100):
+            plain = ui.SolidBar(completed, 100, self.tail).text(20).plain
+            self.assertEqual(
+                ui.SolidBar(completed, 100, self.tail, 0.4, True, heat).text(20).plain, plain
+            )
+        # The cell that is only partly filled is the leading one, so it has the head colour.
+        bar = ui.SolidBar(52.5, 100, self.tail, 0, True, heat).text(20)
+        self.assertIn(f"{self.head} on {ui.EMPTY}", [span.style for span in bar.spans])
+
+    def test_the_moving_block_is_lit_from_its_centre_and_dark_before_a_file_starts(self):
+        bar = ui.SolidBar(0, None, self.tail, 0.5, True, ui.Heat(self.head)).text(20)
+        lit = [span.style for span in bar.spans if bar.plain[span.start : span.end] == "█"]
+        self.assertEqual(lit, [self.tail, self.head, self.tail])
+        before = ui.SolidBar(0, None, self.tail, 0.5, False, ui.Heat(self.head)).text(20)
+        self.assertNotIn("█", before.plain)
+
+    def test_the_fill_breathes_only_while_bytes_arrive(self):
+        class Beat:
+            running, moment = True, 0.0
+
+            def __call__(self):
+                return self.moment
+
+        beat = Beat()
+        column = ui.SolidBarColumn(self.tail, beat, lambda: 50, ui.Heat(self.head, True, True))
+        task = SimpleNamespace(completed=0, total=100, fields={"indicator": True})
+
+        def first_cell():
+            return column.render(task).text(20).spans[0].style
+
+        rest = first_cell()
+        beat.moment = ui.BREATH_PERIOD / 2
+        self.assertNotEqual(first_cell(), rest)
+        # A pause, a merge or a failure stops the clock: the bar rests instead of freezing mid-breath.
+        beat.running = False
+        self.assertEqual(first_cell(), rest)
+
+    def test_the_panel_has_a_blue_item_bar_and_a_pink_file_bar_that_breathes_with_motion(self):
+        for gradient, motion in ((True, True), (True, False), (False, True), (False, False)):
+            screen = ui.UI(True)
+            screen.gradient, screen.motion = gradient, motion
+            session = ui.Session(screen, 2)
+            item, file = session.overall.columns[1], session.file.columns[1]
+            self.assertEqual((item.color, item.heat), (ui.BLUE, None))
+            self.assertEqual(file.color, ui.BAR_PINK)
+            self.assertEqual(
+                (file.heat.head, file.heat.smooth, file.heat.breathe),
+                (ui.BAR_RED, gradient, gradient and motion),
+            )
 
 
 class Moving(unittest.TestCase):
