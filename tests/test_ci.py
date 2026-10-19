@@ -254,8 +254,32 @@ class Workflows(unittest.TestCase):
         self.assertEqual(workflow.count("scripts/ci_summary.py"), 2)  # POSIX and Windows
         self.assertNotIn("run: .venv/bin/python -m unittest", workflow)
         self.assertNotIn("run: .venv/Scripts/python.exe -m unittest", workflow)
-        self.assertIn("ffmpeg -version", workflow)
-        self.assertIn("python -VV", workflow)
+
+    def step(self, name):
+        """The text of one step of the native job, from its name to the next step."""
+        workflow = text(WORKFLOWS / "compatibility.yml")
+        start = workflow.index(f"      - name: {name}\n")
+        end = workflow.find("\n      - ", start + 1)
+        return workflow[start : end if end >= 0 else len(workflow)]
+
+    def test_the_tool_versions_are_found_the_way_the_program_finds_them(self):
+        # A bash on Windows may not see the PATH that the later steps and the tests see (a job
+        # failed there with "ffmpeg: command not found"), so Python looks the tools up itself.
+        step = self.step("Tool versions")
+        self.assertIn("shell: python", step)
+        self.assertIn("shutil.which(tool)", step)
+        self.assertIn("sys.version", step)
+        self.assertIn("'-version'", step)
+        self.assertIn("sys.exit('not on PATH", step)  # a missing tool fails here, naming itself
+        self.assertNotIn("shell: bash", step)
+
+    def test_the_windows_ffmpeg_step_hands_the_found_folders_to_the_next_steps(self):
+        step = self.step("FFmpeg Windows")
+        self.assertIn("foreach ($tool in 'ffmpeg', 'ffprobe')", step)
+        self.assertIn("Add-Content $env:GITHUB_PATH (Split-Path -Parent $found.Source)", step)
+        self.assertIn("throw", step)
+        # The folder is the one where the tool was found, not an assumed one.
+        self.assertNotIn("Add-Content $env:GITHUB_PATH 'C:", step)
 
     def test_the_release_waits_for_lint_and_every_native_job(self):
         workflow = text(WORKFLOWS / "compatibility.yml")
