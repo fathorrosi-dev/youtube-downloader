@@ -57,31 +57,13 @@ jobs:
         run: command -v ffmpeg >/dev/null || brew install ffmpeg
       - name: FFmpeg Windows
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
-            for ($attempt = 1; $attempt -le 3; $attempt++) {
-              choco install ffmpeg --yes --no-progress
-              if ($LASTEXITCODE -eq 0) { break }
-              if ($attempt -eq 3) { throw 'FFmpeg installation failed after retries' }
-              Start-Sleep -Seconds 5
-            }
-          }
-          # The steps after this one must find the tools this step found. Put the folder of each on
-          # GITHUB_PATH wherever it is, instead of assuming where choco puts its shims, and fail
-          # here, with the contents of the shim folder, if one of them is missing.
-          $env:Path = "C:\ProgramData\chocolatey\bin;$env:Path"
-          foreach ($tool in 'ffmpeg', 'ffprobe') {
-            $found = Get-Command $tool -ErrorAction SilentlyContinue
-            if (-not $found) {
-              Get-ChildItem 'C:\ProgramData\chocolatey\bin' -ErrorAction SilentlyContinue | Out-String | Write-Host
-              throw "$tool is not on PATH after the installation"
-            }
-            Write-Host "$tool -> $($found.Source)"
-            Add-Content $env:GITHUB_PATH (Split-Path -Parent $found.Source)
-          }
+        # Chocolatey's community feed sometimes answers 503; choco then installs nothing and still
+        # exits with 0. The script judges by whether ffmpeg and ffprobe can be found, retries, falls
+        # back to a checksummed download, and hands the folders of what it found to the next steps.
+        run: python scripts/ci_ffmpeg.py
       - name: Tool versions
-        # FFmpeg comes from apt, brew or choco without a pinned version; this records which one ran.
+        # FFmpeg comes from apt, brew, choco or (Windows fallback) a pinned download; this records
+        # which one ran.
         # Python looks the tools up the way the program does (shutil.which), not through a bash
         # whose PATH can differ from the one the later steps and the tests see.
         shell: python

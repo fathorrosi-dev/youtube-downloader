@@ -1,6 +1,7 @@
 """The CI helpers and the rules that keep the workflows, the support policy and the documents in
 step. The helpers live in scripts/, which is in the repository and not in the release package."""
 
+import hashlib
 import io
 import json
 import os
@@ -9,9 +10,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 BASE = Path(__file__).resolve().parents[1]
@@ -219,6 +222,263 @@ class PinStatus(unittest.TestCase):
             self.pins.current_pin("rich==14.3.4\n")
 
 
+@unittest.skipUnless((SCRIPTS / "ci_ffmpeg.py").is_file(), "scripts/ is not part of the package")
+class FfmpegForWindows(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SCRIPTS))
+        import ci_ffmpeg
+
+        cls.ff = ci_ffmpeg
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+
+    def program(self, folder, name):
+        """An executable stand-in that shutil.which finds on Windows and elsewhere."""
+        folder.mkdir(parents=True, exist_ok=True)
+        file = folder / (name + (".exe" if os.name == "nt" else ""))
+        file.write_text("")
+        file.chmod(0o755)
+        return file
+
+    def tools_in(self, folder):
+        for tool in self.ff.TOOLS:
+            self.program(folder, tool)
+
+    def release(self, name="release.zip", members=("ffmpeg.exe", "ffprobe.exe", "ffplay.exe")):
+        """A zip laid out like gyan.dev's essentials build, and the SHA-256 of that file."""
+        archive = self.root / name
+        with zipfile.ZipFile(archive, "w") as bundle:
+            for member in members:
+                bundle.writestr(f"ffmpeg-9.0.2-essentials_build/bin/{member}", "binary")
+        return archive, hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    def quiet(self, function, *args, **kwargs):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            result = function(*args, **kwargs)
+        return result, out.getvalue()
+
+    # -- Chocolatey ---------------------------------------------------------------------------
+
+    def test_an_exit_code_of_zero_is_not_taken_for_an_installation(self):
+        # The 503 case: choco printed "installed 0/0 packages" and exited with 0, every time.
+        bin_folder = self.root / "choco-bin"
+        self.program(bin_folder, "choco")
+        shims = self.root / "shims"
+        calls, sleeps = [], []
+
+        def run(command, check):
+            calls.append(command[1:])
+            if len(calls) == 3:  # the feed answers on the third attempt
+                self.tools_in(shims)
+            return SimpleNamespace(returncode=0)
+
+        path = os.pathsep.join([str(bin_folder), str(shims)])
+        installed, _ = self.quiet(self.ff.from_chocolatey, path, run=run, sleep=sleeps.append)
+        self.assertTrue(installed)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0], ["install", "ffmpeg", "--yes", "--no-progress"])
+        wait = self.ff.RETRY_SECONDS
+        self.assertEqual(sleeps, [wait, wait * 2])  # waits longer each time, not after success
+
+    def test_chocolatey_gives_up_after_its_attempts(self):
+        bin_folder = self.root / "choco-bin"
+        self.program(bin_folder, "choco")
+        calls, sleeps = [], []
+
+        def run(command, check):
+            calls.append(command)
+            return SimpleNamespace(returncode=0)
+
+        installed, shown = self.quiet(
+            self.ff.from_chocolatey, str(bin_folder), run=run, sleep=sleeps.append
+        )
+        self.assertFalse(installed)
+        self.assertEqual(len(calls), self.ff.ATTEMPTS)
+        self.assertEqual(len(sleeps), self.ff.ATTEMPTS - 1)
+        self.assertIn("still missing", shown)
+
+    def test_without_choco_nothing_is_started(self):
+        calls = []
+        installed, shown = self.quiet(
+            self.ff.from_chocolatey, str(self.root), run=lambda *a, **k: calls.append(a)
+        )
+        self.assertFalse(installed)
+        self.assertEqual(calls, [])
+        self.assertIn("choco is not on PATH", shown)
+
+    # -- the pinned download ------------------------------------------------------------------
+
+    def test_the_pinned_release_is_written_down_completely(self):
+        self.assertRegex(self.ff.SHA256, r"^[0-9a-f]{64}$")
+        self.assertIn(self.ff.VERSION, self.ff.ARCHIVE)
+        for url in self.ff.URLS:
+            self.assertTrue(url.startswith("https://"), url)
+            self.assertTrue(url.endswith("/" + self.ff.ARCHIVE), url)
+
+    def test_a_download_with_the_expected_hash_is_unpacked(self):
+        archive, digest = self.release()
+        folder, _ = self.quiet(
+            self.ff.from_download,
+            self.root / "target",
+            urls=[archive.as_uri()],
+            expected=digest,
+        )
+        self.assertEqual(folder.name, "bin")
+        self.assertTrue((folder / "ffmpeg.exe").is_file())
+        self.assertTrue((folder / "ffprobe.exe").is_file())
+
+    def test_a_download_with_another_hash_is_not_unpacked(self):
+        archive, _ = self.release()
+        target = self.root / "target"
+        folder, shown = self.quiet(
+            self.ff.from_download,
+            target,
+            urls=[archive.as_uri()],
+            expected="0" * 64,
+            sleep=lambda seconds: None,
+        )
+        self.assertIsNone(folder)
+        self.assertIn("SHA-256", shown)
+        self.assertFalse((target / "unpacked").exists())
+
+    def test_the_next_address_is_tried_when_one_does_not_answer(self):
+        archive, digest = self.release()
+        missing = (self.root / "absent.zip").as_uri()
+        folder, shown = self.quiet(
+            self.ff.from_download,
+            self.root / "target",
+            urls=[missing, archive.as_uri()],
+            expected=digest,
+            sleep=lambda seconds: None,
+        )
+        self.assertEqual(folder.name, "bin")
+        self.assertIn("absent.zip", shown)
+
+    def test_a_transfer_that_arrives_wrong_is_fetched_again(self):
+        archive, digest = self.release()
+        answers = []
+
+        def fetch(url, destination):
+            answers.append(url)
+            if len(answers) == 1:
+                return "f" * 64  # cut off on the way
+            return self.ff.download(url, destination)
+
+        folder, _ = self.quiet(
+            self.ff.from_download,
+            self.root / "target",
+            urls=[archive.as_uri()],
+            expected=digest,
+            fetch=fetch,
+        )
+        self.assertEqual(len(answers), 2)
+        self.assertEqual(folder.name, "bin")
+
+    def test_an_archive_without_both_tools_is_refused(self):
+        archive, digest = self.release(members=("ffmpeg.exe",))
+        folder, shown = self.quiet(
+            self.ff.from_download,
+            self.root / "target",
+            urls=[archive.as_uri()],
+            expected=digest,
+        )
+        self.assertIsNone(folder)
+        self.assertIn("ffprobe.exe", shown)
+
+    # -- the whole flow -----------------------------------------------------------------------
+
+    def environment(self, **extra):
+        return {
+            "PATH": "",
+            "RUNNER_TEMP": str(self.root),
+            "GITHUB_PATH": str(self.root / "gh"),
+            **extra,
+        }
+
+    def found_in(self, folder):
+        """A stand-in for find_tools that finds the tools whenever `folder` is on the path."""
+
+        def find(path):
+            if str(folder) not in path.split(os.pathsep):
+                return {}
+            return {tool: str(Path(folder) / tool) for tool in self.ff.TOOLS}
+
+        return find
+
+    def test_tools_that_are_already_there_are_not_installed(self):
+        folder = self.root / "tools"
+        self.tools_in(folder)
+        calls = []
+        code, _ = self.quiet(
+            self.ff.main,
+            self.environment(PATH=str(folder)),
+            via_chocolatey=lambda path: calls.append("choco"),
+            via_download=lambda target: calls.append("download"),
+            check=lambda program: True,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [])
+        self.assertEqual((self.root / "gh").read_text(encoding="utf-8"), f"{folder}\n")
+
+    def test_a_download_is_the_fallback_and_its_folder_reaches_the_next_steps(self):
+        folder = self.root / "unpacked" / "bin"
+        targets = []
+
+        def via_download(target):
+            targets.append(target)
+            return folder
+
+        code, shown = self.quiet(
+            self.ff.main,
+            self.environment(),
+            find=self.found_in(folder),
+            via_chocolatey=lambda path: False,
+            via_download=via_download,
+            check=lambda program: True,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(targets, [self.root / "ffmpeg"])
+        self.assertIn("Chocolatey did not deliver", shown)
+        self.assertEqual((self.root / "gh").read_text(encoding="utf-8"), f"{folder}\n")  # once
+
+    def test_the_job_fails_naming_what_is_missing_when_nothing_worked(self):
+        code, shown = self.quiet(
+            self.ff.main,
+            self.environment(),
+            find=lambda path: {},
+            via_chocolatey=lambda path: False,
+            via_download=lambda target: None,
+            check=lambda program: True,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("::error::", shown)
+        self.assertIn("ffmpeg, ffprobe", shown)
+        self.assertFalse((self.root / "gh").exists())
+
+    def test_a_tool_that_does_not_run_fails_the_job_and_is_not_handed_on(self):
+        folder = self.root / "tools"
+        self.tools_in(folder)
+        code, shown = self.quiet(
+            self.ff.main,
+            self.environment(PATH=str(folder)),
+            via_chocolatey=lambda path: False,
+            via_download=lambda target: None,
+            check=lambda program: False,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("-version did not run", shown)
+        self.assertFalse((self.root / "gh").exists())
+
+    def test_without_github_path_the_folders_are_only_named(self):
+        _, shown = self.quiet(self.ff.hand_on, ["C:\\tools"], None)
+        self.assertIn("GITHUB_PATH is not set", shown)
+
+
 @unittest.skipUnless(WORKFLOWS.is_dir(), ".github/ is not present")
 class Workflows(unittest.TestCase):
     def test_the_python_floor_is_the_same_everywhere(self):
@@ -273,13 +533,16 @@ class Workflows(unittest.TestCase):
         self.assertIn("sys.exit('not on PATH", step)  # a missing tool fails here, naming itself
         self.assertNotIn("shell: bash", step)
 
-    def test_the_windows_ffmpeg_step_hands_the_found_folders_to_the_next_steps(self):
+    def test_the_windows_ffmpeg_step_runs_the_script_that_judges_by_what_it_finds(self):
+        # A job failed because choco exited with 0 after a 503 from its feed and installed
+        # nothing; an exit code in the workflow is what let that pass the install step.
         step = self.step("FFmpeg Windows")
-        self.assertIn("foreach ($tool in 'ffmpeg', 'ffprobe')", step)
-        self.assertIn("Add-Content $env:GITHUB_PATH (Split-Path -Parent $found.Source)", step)
-        self.assertIn("throw", step)
-        # The folder is the one where the tool was found, not an assumed one.
-        self.assertNotIn("Add-Content $env:GITHUB_PATH 'C:", step)
+        self.assertIn("if: runner.os == 'Windows'", step)
+        self.assertIn("run: python scripts/ci_ffmpeg.py", step)
+        self.assertNotIn("LASTEXITCODE", step)
+        self.assertNotIn("choco install", step)
+        workflow = text(WORKFLOWS / "compatibility.yml")
+        self.assertLess(workflow.index("actions/setup-python"), workflow.index(step))
 
     def test_the_release_waits_for_lint_and_every_native_job(self):
         workflow = text(WORKFLOWS / "compatibility.yml")

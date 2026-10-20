@@ -31,4 +31,4 @@ Untuk menyiapkan paket lokal: `python3 release_bundle.py /jalur/output` (menulis
 
 ## Gaya kode
 
-CI menolak kode yang belum diformat. Sebelum commit: `python -m pip install ruff==0.17.0`, lalu `ruff format .` dan `ruff check .` (konfigurasi di `ruff.toml`). Di CI, `scripts/ci_summary.py` membungkus `unittest` sehingga tes yang gagal disebut namanya di anotasi dan ringkasan job. Satu pernyataan per baris; titik koma pemisah dan pernyataan majemuk satu baris ditolak oleh lint.
+CI menolak kode yang belum diformat. Sebelum commit: `python -m pip install ruff==0.17.0`, lalu `ruff format .` dan `ruff check .` (konfigurasi di `ruff.toml`). Di CI, `scripts/ci_summary.py` membungkus `unittest` sehingga tes yang gagal disebut namanya di anotasi dan ringkasan job. Di job Windows, `scripts/ci_ffmpeg.py` memasang FFmpeg lewat Chocolatey (diulang bila gagal; berhasil berarti `ffmpeg` dan `ffprobe` benar-benar ada, bukan kode keluar `choco`) dan, bila Chocolatey tetap tidak menjawab, dari rilis 9.0.2 yang hash SHA-256-nya dicek. Satu pernyataan per baris; titik koma pemisah dan pernyataan majemuk satu baris ditolak oleh lint.
