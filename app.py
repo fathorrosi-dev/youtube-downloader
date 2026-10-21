@@ -10,6 +10,7 @@ import time
 import platform
 import subprocess
 import shutil
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime
@@ -59,7 +60,7 @@ from store import (
     resumable_jobs,
     Archive,
 )
-from runner import run, WorkerError
+from runner import run, WorkerError, cancelled_by
 from rich.text import Text
 from ui import UI, Session, Cancelled, BLUE, DIM, RED, clock, size, tidy
 
@@ -300,7 +301,8 @@ def inspect_selection(ui, selected, browser):
 
     A few items are looked up at the same time, but their results are taken in playlist order,
     so what is listed, skipped or counted as a failure is the same as one at a time. When the
-    batch stops, the lookups that have not started are dropped."""
+    batch stops (a rate limit, three failures, Ctrl+C) the lookups that have not started are
+    dropped and the ones that are running are stopped, so nothing keeps the terminal waiting."""
     metadata = []
     unavailable = []
     errors = 0
@@ -308,9 +310,15 @@ def inspect_selection(ui, selected, browser):
     label = "Memeriksa kualitas dan subtitle"
     workers = inspect_workers(total)
     pool = ThreadPoolExecutor(workers) if workers > 1 else nullcontext()
+    stop = threading.Event()
+
+    def look_up(url):
+        with cancelled_by(stop):  # the worker this thread starts ends when `stop` is set
+            return inspect_url(url, browser)
+
     with ui.activity(f"{label} · 0/{total}") as progress, pool:
         if workers > 1:
-            futures = [pool.submit(inspect_url, entry["url"], browser) for entry in selected]
+            futures = [pool.submit(look_up, entry["url"]) for entry in selected]
             fetch = lambda index: futures[index].result()  # noqa: E731
         else:
             futures = []
@@ -336,8 +344,13 @@ def inspect_selection(ui, selected, browser):
                 if progress:
                     progress(f"{label} · {number}/{total}", (number, total))
         except BaseException:
+            stop.set()
+            running = sum(1 for future in futures if future.running())
             for future in futures:
                 future.cancel()
+            if progress and running:
+                # Leaving the pool waits for the workers to close; say so instead of spinning on.
+                progress(f"Menghentikan · menutup {running} pencarian yang berjalan")
             raise
     if unavailable:
         ui.table(

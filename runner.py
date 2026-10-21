@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from contextlib import contextmanager
 from store import BASE, STATE, write_json
 from compat import ProcessTree, clean_environment, rotate_log
 
@@ -21,6 +22,28 @@ class WorkerError(RuntimeError):
     def __init__(self, message, category="system"):
         super().__init__(message)
         self.category = category
+
+
+class WorkerCancelled(Exception):
+    """run() was told to stop by its cancel event. Not a WorkerError: the worker did not fail,
+    so no caller counts it as a failure."""
+
+
+_bound = threading.local()
+
+
+@contextmanager
+def cancelled_by(event):
+    """Every run() that starts in this thread inside the block stops when `event` is set.
+
+    For work done in pool threads through functions that do not take a cancel argument: the
+    wrapper that a thread runs says which event stops it."""
+    before = getattr(_bound, "event", None)
+    _bound.event = event
+    try:
+        yield
+    finally:
+        _bound.event = before
 
 
 def read_events(stream, messages, cancel):
@@ -89,7 +112,14 @@ def read_events(stream, messages, cancel):
         put(None)
 
 
-def run(request, on_event=None):
+def run(request, on_event=None, cancel=None):
+    """Run one worker and return its result. When the `cancel` event (or the one bound by
+    cancelled_by) is set, the worker's process tree is stopped within a quarter of a second and
+    WorkerCancelled is raised; nothing is left running."""
+    if cancel is None:
+        cancel = getattr(_bound, "event", None)
+    if cancel is not None and cancel.is_set():
+        raise WorkerCancelled()
     STATE.mkdir(parents=True, exist_ok=True)
     config = STATE / f"worker-{uuid.uuid4().hex}.json"
     write_json(config, request)
@@ -98,7 +128,7 @@ def run(request, on_event=None):
     done = None
     reader = None
     messages = queue.Queue(MAX_QUEUE)
-    cancel = threading.Event()
+    stop_reader = threading.Event()
     try:
         rotate_log(STATE / "download.log")
         with (STATE / "download.log").open("a", encoding="utf-8") as log:
@@ -117,13 +147,15 @@ def run(request, on_event=None):
             )
             tree = ProcessTree(process)
             reader = threading.Thread(
-                target=read_events, args=(process.stdout, messages, cancel), daemon=True
+                target=read_events, args=(process.stdout, messages, stop_reader), daemon=True
             )
             reader.start()
             process.stdin.write(b"START\n")
             process.stdin.flush()
             process.stdin.close()
             while True:
+                if cancel is not None and cancel.is_set():
+                    raise WorkerCancelled()
                 try:
                     event = messages.get(timeout=0.25)
                 except queue.Empty:
@@ -165,7 +197,7 @@ def run(request, on_event=None):
             if os.name != "nt":
                 tree.stop()
             tree.close()
-        cancel.set()
+        stop_reader.set()
         if reader:
             reader.join(timeout=3)
         if process and process.stdout:
