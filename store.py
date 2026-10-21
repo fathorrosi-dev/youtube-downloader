@@ -22,9 +22,11 @@ def now():
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
+    # One dumps and one write: the same bytes as json.dump to the stream, about four times faster
+    # (json.dump feeds the stream a piece at a time), and a job is saved twice per item.
+    text = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
     with temp.open("w", encoding="utf-8") as stream:
-        json.dump(value, stream, ensure_ascii=False, indent=2)
-        stream.write("\n")
+        stream.write(text)
         stream.flush()
         os.fsync(stream.fileno())
     temp.replace(path)
