@@ -46,7 +46,7 @@ Pemasangan sungguhan 1.0.0 → 1.1.0 → rollback 1.0.0 lulus pada Ubuntu lokal.
 
 Pemasangan Ubuntu ke home selesai setelah CI lulus, dengan backup program 1.0.0. Pemeriksaan setup/status dan 37 tes paket dari lokasi home berhasil (36 dijalankan + satu installer skip); checksum program source/home cocok dan X Bookmarks tidak berubah. Tidak ada job/arsip/media pengguna di home saat pembaruan.
 
-## Perubahan setelah 1.2.0 (belum dirilis)
+## Perubahan setelah 1.2.0 (termasuk dalam tag v1.3.0)
 
 Belum diverifikasi oleh 12 job native CI; hasil di bawah hanya dari Ubuntu 24.04, Python 3.13.16, FFmpeg 6.1.1.
 
@@ -62,7 +62,7 @@ Belum diverifikasi oleh 12 job native CI; hasil di bawah hanya dari Ubuntu 24.04
 - Preview juga dijalankan pada PTY sungguhan dengan emulator layar (lebar 100): tahap, daftar, dan bar bergerak sesuai. Belum diperiksa: 12 job native CI, Windows ConPTY, macOS, terminal pengguna (Warp), dan pengunduhan YouTube nyata dengan panel baru.
 - Setup: unduhan Deno yang terpotong (koneksi putus sebelum `Content-Length` terpenuhi, yang tidak dilaporkan urllib sebagai error) kini terdeteksi dan dilanjutkan, dan arsip dengan checksum salah diunduh ulang sekali dari awal. Sebelumnya setup pertama bisa gagal dengan "Checksum Deno tidak cocok; arsip ditolak" lalu berhasil pada percobaan berikutnya. Dua skenario (body terpotong dan file `.part` rusak) direproduksi dengan server lokal pada Python 3.13.16 dan 3.14.6 sebelum diperbaiki; empat tes baru memakai server lokal yang sama. Hasil ini belum diverifikasi oleh 12 job native CI.
 
-## Tinjauan repositori: 20 perubahan (belum dirilis)
+## Tinjauan repositori: 20 perubahan (termasuk dalam tag v1.3.0)
 
 Dikerjakan setelah tinjauan statis seluruh repositori; versi tetap 1.3.0. Dijalankan di sandbox Ubuntu 24.04 dengan Python 3.12.3 dan FFmpeg 6.1.1, **bukan** di mesin pengguna.
 
@@ -74,7 +74,7 @@ Dikerjakan setelah tinjauan statis seluruh repositori; versi tetap 1.3.0. Dijala
 - **Rilis dan dependensi:** workflow `dependencies.yml` (mingguan) dan langkah attestation pada job `release`; `update` memeriksa attestation dengan `gh` bila ada (`YTDL_VERIFY_ATTESTATION=1` mewajibkannya).
 - **Belum diperiksa:** kedua workflow belum dijalankan di GitHub Actions (tiga langkah pemeriksaan `dependencies.yml` dijalankan lokal, langkah pembuka issue tidak; langkah attestation memerlukan paket GitHub yang mendukungnya untuk repo privat, dan `gh attestation verify` hanya diuji dengan `gh` tiruan); 12 job native CI; Windows ConPTY dan macOS; warna 256/16 pada Terminal.app, Warp, dan Windows Terminal (diuji pada PTY dengan kombinasi `TERM`/`COLORTERM`); pengunduhan YouTube nyata.
 
-## Tinjauan kedua: 32 rekomendasi (belum dirilis)
+## Tinjauan kedua: 32 rekomendasi (dalam tag v1.3.0, kecuali warna bar dan perbaikan FFmpeg Windows, yang belum dirilis)
 
 Dikerjakan setelah tinjauan kedua (AUD-101..116, UX-101..106, DX-101..106, FEAT-101..104) dan run CI #23 untuk `6f58eac`, yang merah di Windows (Python 3.10, 3.13, 3.14) dan macOS Apple Silicon 3.10. Versi tetap 1.3.0. Dijalankan di sandbox Ubuntu 24.04 dengan FFmpeg 6.1.1, **bukan** di mesin pengguna dan **bukan** di runner CI.
 

@@ -6,7 +6,7 @@ import re
 from datetime import date
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 # A yt-dlp release older than this many days is worth a hint when downloads fail.
 PIN_WARN_DAYS = 45
 MODES = ("video-audio", "audio", "video")
