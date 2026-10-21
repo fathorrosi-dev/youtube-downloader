@@ -951,6 +951,7 @@ class StatusJson(unittest.TestCase):
             sorted(
                 [
                     "version",
+                    "pace",
                     "platform",
                     "python",
                     "tools",

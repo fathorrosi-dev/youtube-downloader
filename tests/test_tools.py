@@ -653,6 +653,85 @@ class Integration(unittest.TestCase):
         self.assertEqual([i["status"] for i in saved["items"]], ["failed", "failed"])
         self.assertIn("belum tercatat", saved["items"][0]["error"]["message"])
 
+    def test_a_download_reports_where_its_time_went_and_shows_its_pauses(self):
+        item = self.item(subs=True)
+        pace = {"name": "test", "file": [0.2, 0.2], "requests": 0}
+        result, events = self.download(item, pace=pace)
+        timings = result["timings"]
+        for phase in model.TIMING_PHASES:
+            self.assertIn(phase, timings)
+            self.assertGreaterEqual(timings[phase], 0)
+        self.assertLessEqual(sum(timings[p] for p in model.TIMING_PHASES), timings["total"] + 0.01)
+        self.assertEqual(
+            model.clean_timings(timings).keys() - {"speed"}, timings.keys() - {"speed"}
+        )
+        self.assertGreater(timings["bytes"], 0)
+        # One pause of 0.2 s before each of the two streams, announced before the stream starts.
+        pauses = [i for i, e in enumerate(events) if e["type"] == "wait"]
+        self.assertEqual(len(pauses), 2)
+        self.assertAlmostEqual(timings["waited"], 0.4, delta=0.05)
+        for index in pauses:
+            self.assertIn("jeda antar-unduhan", events[index]["message"])
+            self.assertEqual(events[index - 1]["type"], "stage")
+            self.assertIn(events[index - 1]["phase"], ("video", "audio"))
+            self.assertEqual(events[index + 1]["type"], "start")
+
+    def test_a_profile_without_a_pause_sends_no_wait(self):
+        pace = {"name": "none", "file": [0, 0], "requests": 0}
+        result, events = self.download(self.item(), pace=pace)
+        self.assertEqual([e for e in events if e["type"] == "wait"], [])
+        self.assertEqual(result["timings"]["waited"], 0)
+
+    def run_item_with(self, result_extra, item_extra=None):
+        item = {**copy.deepcopy(self.item()), **(item_extra or {})}
+        job = store.new_job([item], str(self.media))
+        sent = []
+
+        def fake_run(request, callback=None):
+            sent.append(request)
+            path = self.media / "video" / "a.mp4"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x")
+            return {
+                "path": str(path),
+                "mode": "video-audio",
+                "subtitles": [],
+                "missing": [],
+                **result_extra,
+            }
+
+        with (
+            patch.object(app, "run", side_effect=fake_run),
+            patch.object(store.Archive, "put") as put,
+            redirect_stderr(io.StringIO()),
+        ):
+            app.execute(ui.UI(True), job)
+        return store.load_job(job["id"]), put, sent
+
+    def test_the_timings_are_kept_with_the_item_and_not_in_the_archive(self):
+        reported = {
+            "total": 5.0,
+            "video": 2.0,
+            "waited": 1.0,
+            "bytes": 100,
+            "speed": 50.0,
+            "url": "https://example.test/?sig=secret",  # not a timing: must not be kept
+        }
+        saved, put, sent = self.run_item_with({"timings": reported})
+        timings = saved["items"][0]["timings"]
+        self.assertEqual(set(timings) - set(model.TIMING_KEYS), set())
+        self.assertIn("wall", timings)  # measured by the app around the worker
+        self.assertGreaterEqual(timings["wall"], 0)
+        self.assertEqual((timings["total"], timings["video"]), (5.0, 2.0))
+        self.assertNotIn("timings", put.call_args[0][1])
+        self.assertNotIn("timings", saved["items"][0]["result"])
+        self.assertNotIn("secret", json.dumps(saved))
+        self.assertEqual(sent[0]["pace"], model.pace_profile())
+
+    def test_an_item_run_again_without_timings_loses_the_old_ones(self):
+        saved, _, _ = self.run_item_with({}, {"timings": {"total": 99.0}})
+        self.assertNotIn("timings", saved["items"][0])
+
     def test_oversized_download_log_is_rotated_when_a_worker_starts(self):
         log = self.state / "download.log"
         log.write_bytes(b"x" * (5 * 1024**2 + 1))

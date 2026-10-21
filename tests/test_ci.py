@@ -662,6 +662,8 @@ class Workflows(unittest.TestCase):
             "YTDL_THEME",
             "YTDL_MOTION",
             "YTDL_INSPECT_WORKERS",
+            "YTDL_PACE",
+            "--timings",
             "--links-file",
             "--abandoned",
             "status --json",

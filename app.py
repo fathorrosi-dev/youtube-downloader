@@ -47,6 +47,9 @@ from model import (
     has_audio,
     resolution,
     release_age_days,
+    pace_profile,
+    clean_timings,
+    TIMING_PHASES,
 )
 from store import (
     BASE,
@@ -140,8 +143,22 @@ def stop_message(category):
     return text + " Lalu lanjutkan:"
 
 
+def current_pace():
+    """The pacing profile named by YTDL_PACE (normal when it is not set); an unknown name is an
+    error that lists the accepted ones."""
+    return pace_profile(os.environ.get("YTDL_PACE"))
+
+
 def inspect_url(url, browser=None, playlist=False):
-    return run({"action": "inspect", "url": url, "browser": browser, "playlist": playlist})
+    return run(
+        {
+            "action": "inspect",
+            "url": url,
+            "browser": browser,
+            "playlist": playlist,
+            "pace": current_pace(),
+        }
+    )
 
 
 def format_label(f):
@@ -856,14 +873,21 @@ def execute(ui, job):
                         "item": item,
                         "output": job["output"],
                         "browser": job.get("browser"),
+                        "pace": current_pace(),
                     }
                     if previous:
                         request["existing_file"] = previous["path"]
                     item["status"] = "running"
                     save_job(job)
                     session.item_start(phases(item))
+                    began = time.monotonic()
                     try:
                         result = run(request, session.event)
+                        wall = time.monotonic() - began
+                        # Where the time went is kept with the item, not in the archive record.
+                        timings = clean_timings(
+                            result.pop("timings", None) if isinstance(result, dict) else None
+                        )
                         try:
                             archive.put(key, result)
                         except (
@@ -883,7 +907,12 @@ def execute(ui, job):
                         item["result"] = result
                         item["status"] = "partial" if result.get("missing") else "complete"
                         item.pop("error", None)
-                        session.item_end(item["status"])
+                        if timings:
+                            timings["wall"] = round(wall, 3)
+                            item["timings"] = timings
+                        else:
+                            item.pop("timings", None)
+                        session.item_end(item["status"], timings)
                         consecutive = 0
                     except WorkerError as exc:
                         item["status"] = "failed"
@@ -968,12 +997,110 @@ def state_note(figures=UNSET):
     return note
 
 
-def status(ui, as_json=False):
+def pace_note(data):
+    """The pacing profile for the status table and JSON; an unknown YTDL_PACE is shown, not
+    raised, because `status` is how a person finds out what is wrong."""
+    name = os.environ.get("YTDL_PACE")
+    try:
+        profile = pace_profile(name)
+    except SelectionError as exc:
+        data["pace"] = {"name": name, "error": str(exc)}
+        return f"YTDL_PACE={name} tidak dikenal (pilih: normal, careful, fast)"
+    data["pace"] = profile
+    low, high = profile["file"]
+    return (
+        f"{profile['name']} · {low:g}-{high:g} d sebelum tiap unduhan, "
+        f"{profile['requests']:g} d antar-permintaan"
+    )
+
+
+def job_timings(job, detail=False):
+    """Where the time of a job went, from the timings its items carry: totals over the items that
+    have them, and with `detail` one entry per item. None when no item has timings (a job made
+    before they were recorded, or whose items were all skipped).
+
+    "overhead" is the wall time around each worker minus the worker's own total: starting the
+    process, importing yt-dlp and closing down. "speed" is the bytes of those items over the time
+    their streams were not waiting."""
+    rows = [
+        (item, item["timings"])
+        for item in job.get("items") or []
+        if isinstance(item, dict) and isinstance(item.get("timings"), dict)
+    ]
+    if not rows:
+        return None
+    total = lambda key: round(sum(t.get(key) or 0 for _, t in rows), 3)  # noqa: E731
+    busy = sum(t["bytes"] / t["speed"] for _, t in rows if t.get("bytes") and t.get("speed"))
+    got = sum(t["bytes"] for _, t in rows if t.get("bytes") and t.get("speed"))
+    data = {
+        "items": len(rows),
+        "wall": total("wall"),
+        "worker": total("total"),
+        "overhead": round(
+            sum(max(0, (t.get("wall") or 0) - (t.get("total") or 0)) for _, t in rows), 3
+        ),
+        "waited": total("waited"),
+        "bytes": total("bytes"),
+        "speed": round(got / busy, 1) if busy else None,
+        "phases": {name: total(name) for name in TIMING_PHASES},
+    }
+    if detail:
+        data["per_item"] = [
+            {"id": item.get("id"), "title": item.get("title"), **timings} for item, timings in rows
+        ]
+    return data
+
+
+def timings_table(ui, job):
+    """The timings of one job as a table: a row per item and a last row for the sum."""
+    data = job_timings(job, detail=True)
+    if not data:
+        return
+    seconds = lambda value: f"{value:.1f}" if value else "-"  # noqa: E731
+    rows = []
+    for entry in data["per_item"][:20]:
+        speed = entry.get("speed")
+        rows.append(
+            (
+                str(entry.get("title") or entry.get("id") or "?")[:28],
+                *(seconds(entry.get(name)) for name in (*TIMING_PHASES, "waited", "wall")),
+                f"{size(speed)}/s" if speed else "-",
+            )
+        )
+    if len(data["per_item"]) > 20:
+        rows.append((f"... {len(data['per_item']) - 20} item lagi", *("" for _ in range(8))))
+    rows.append(
+        (
+            "Jumlah",
+            *(seconds(data["phases"][name]) for name in TIMING_PHASES),
+            seconds(data["waited"]),
+            seconds(data["wall"]),
+            f"{size(data['speed'])}/s" if data["speed"] else "-",
+        )
+    )
+    ui.table(
+        (
+            f"Job {job.get('id')} (detik)",
+            "Metadata",
+            "Video",
+            "Audio",
+            "Subtitle",
+            "Selesai",
+            "Menunggu",
+            "Total",
+            "Kecepatan",
+        ),
+        rows,
+    )
+
+
+def status(ui, as_json=False, timings=False):
     """The state of this installation as a table on stderr, or with --json as one JSON object on
-    stdout (the table is not drawn) for a script to read."""
+    stdout (the table is not drawn) for a script to read. With `timings`, the items' times."""
     figures = state_figures()
     data = {
         "version": VERSION,
+        "pace": None,
         "platform": platform_key(),
         "python": {"version": platform.python_version(), "executable": sys.executable},
         "tools": str(BASE),
@@ -993,6 +1120,7 @@ def status(ui, as_json=False):
         ("Tools", str(BASE)),
         ("Media", data["media"]),
         ("Catatan", state_note(figures)),
+        ("Jeda", pace_note(data)),
     ]
     try:
         from packaging.requirements import Requirement
@@ -1051,10 +1179,13 @@ def status(ui, as_json=False):
             rows.append((name, "tidak tersedia · jalankan setup --check"))
             data["binaries"][name] = {"available": False}
     jobs, unreadable = list_jobs()
-    data["jobs"] = [
-        {"id": j.get("id"), "status": j.get("status"), "items": len(j.get("items") or [])}
-        for j in jobs[:10]
-    ]
+    data["jobs"] = []
+    for j in jobs[:10]:
+        entry = {"id": j.get("id"), "status": j.get("status"), "items": len(j.get("items") or [])}
+        where = job_timings(j, detail=timings)
+        if where:
+            entry["timings"] = where
+        data["jobs"].append(entry)
     data["unreadable_jobs"] = [{"file": name, "reason": reason} for name, reason in unreadable]
     if as_json:
         print(json.dumps(data, ensure_ascii=False, indent=2), flush=True)
@@ -1066,6 +1197,12 @@ def status(ui, as_json=False):
         ui.table(("Job", "Status", "Item"), table)
     for _name, reason in unreadable:
         ui.say(Text(reason, style=DIM))
+    if timings:
+        newest = next((j for j in jobs if job_timings(j)), None)
+        if newest:
+            timings_table(ui, newest)
+        else:
+            ui.say("Belum ada job dengan catatan waktu.", DIM)
 
 
 def job_when(job):
@@ -1227,7 +1364,8 @@ EPILOG = """contoh:
   youtube-downloader resume                pilih job yang dilanjutkan (resume --last: yang terbaru)
   youtube-downloader --links-file link.txt --yes
                                            satu job untuk banyak link (satu per baris)
-  youtube-downloader status [--json]       versi, dependensi, umur yt-dlp, job, ukuran .state
+  youtube-downloader status [--json] [--timings]
+                                           versi, dependensi, umur yt-dlp, job, ukuran .state, waktu
   youtube-downloader clean [--apply] [--abandoned]
                                            lihat atau hapus sisa di .state
   youtube-downloader update [--check]      periksa atau pasang rilis stabil
@@ -1268,6 +1406,11 @@ def build_parser():
     )
     parser.add_argument(
         "--json", action="store_true", help="Status: satu objek JSON di stdout, tanpa tabel"
+    )
+    parser.add_argument(
+        "--timings",
+        action="store_true",
+        help="Status: waktu tiap fase per item (tabel, atau rinci per item di --json)",
     )
     parser.add_argument("--from", dest="old_root", help="Rebase-media: akar media lama")
     parser.add_argument("--to", dest="new_root", help="Rebase-media: akar media baru")
@@ -1342,6 +1485,8 @@ def main(argv=None):
             raise ValueError("--check/--wait hanya digunakan dengan update")
         if args.json and args.action != "status":
             raise ValueError("--json hanya digunakan dengan status")
+        if args.timings and args.action != "status":
+            raise ValueError("--timings hanya digunakan dengan status")
         if args.abandoned and args.action != "clean":
             raise ValueError("--abandoned hanya digunakan dengan clean")
         preset = scripted_preset(args)
@@ -1357,7 +1502,7 @@ def main(argv=None):
             preview(ui)
             return 0
         if args.action == "status":
-            status(ui, args.json)
+            status(ui, args.json, args.timings)
             return 0
         if args.action == "clean":
             return clean_command(ui, args)
@@ -1376,6 +1521,7 @@ def main(argv=None):
         ui.say("")
         if args.browser:
             valid_browser(args.browser)
+        current_pace()  # a YTDL_PACE that is not a profile stops here, before anything is asked
         with lock():
             if args.action == "resume":
                 job = load_job(args.job) if args.job and not args.last else choose_job(ui, args)

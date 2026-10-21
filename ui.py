@@ -893,6 +893,8 @@ class Session:
         self.fid = self.file.add_task("", total=None, label="Menyiapkan", indicator=False)
         self.live = None
         self.last_plain = None
+        # The timings that the downloads of this run reported, for the closing line.
+        self.timed = []
 
     def __enter__(self):
         if not self.ui.plain:
@@ -1028,7 +1030,9 @@ class Session:
         self.beat_at = self.now()
         self.ui.say(line + f" · {size(self.speed)}/s")
 
-    def item_end(self, status):
+    def item_end(self, status, timings=None):
+        if timings:
+            self.timed.append(timings)
         self.clock.active(False)
         self.smoother.freeze()
         index = self.done
@@ -1190,6 +1194,21 @@ class Session:
                 live.update(Text(frame + " Menyelesaikan", style=tone), refresh=True)
                 time.sleep(0.07)
 
+    def timing_line(self):
+        """One quiet line on where the time went in this run: the average speed of what was
+        downloaded and the time spent waiting on purpose (the pause between downloads and before
+        a retry). None when no download of this run reported timings, so an old job or a run of
+        skipped items says nothing."""
+        parts = []
+        speeds = [(t["bytes"], t["speed"]) for t in self.timed if t.get("bytes") and t.get("speed")]
+        if speeds:
+            busy = sum(got / speed for got, speed in speeds)
+            parts.append(f"Rata-rata {size(sum(got for got, _ in speeds) / busy)}/s")
+        waited = sum(t.get("waited") or 0 for t in self.timed)
+        if waited >= 1:
+            parts.append(f"menunggu {duration(waited)}")
+        return " · ".join(parts)
+
     def __exit__(self, exc_type, exc, tb):
         self.clock.active(False)
         if self.live:
@@ -1217,8 +1236,11 @@ class Session:
             style=BLUE,
         )
         self.ui.say(line)
+        indent = "" if self.ui.plain else "  "
         if not self.single:
             self.ui.say(
-                f"{'' if self.ui.plain else '  '}"
-                f"Disimpan {self.saved} · Dilewati {self.skipped} · Gagal {self.failed}"
+                f"{indent}Disimpan {self.saved} · Dilewati {self.skipped} · Gagal {self.failed}"
             )
+        where = self.timing_line()
+        if where:
+            self.ui.say(Text(indent + where, style=DIM))

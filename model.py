@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import re
 from datetime import date
 from urllib.parse import urlparse, parse_qs
@@ -396,3 +397,73 @@ def release_age_days(version, today=None):
     except ValueError:
         return None
     return max(0, ((today or date.today()) - released).days)
+
+
+# What a download records about where its time went (worker.Timings). The phases that ran, the
+# total of the worker, the seconds of that spent waiting on purpose, the media bytes it fetched,
+# their average speed when it is known, and (added by the app) the wall time around the worker.
+TIMING_KEYS = (
+    "metadata",
+    "video",
+    "audio",
+    "subtitle",
+    "finish",
+    "total",
+    "waited",
+    "bytes",
+    "speed",
+    "wall",
+)
+TIMING_PHASES = TIMING_KEYS[:5]
+
+
+def clean_timings(value):
+    """The timings a worker reported, cut down to the known fields and to plain numbers that are
+    finite and not negative, or None when there is nothing usable (no total)."""
+    if not isinstance(value, dict):
+        return None
+    clean = {}
+    for key in TIMING_KEYS:
+        number = value.get(key)
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            continue
+        if math.isfinite(number) and number >= 0:
+            clean[key] = number
+    return clean if "total" in clean else None
+
+
+# Pacing: how long the worker waits before each file it downloads (a random time between the two
+# numbers, in seconds) and between the requests of one lookup. "normal" is what the tool has
+# always done; the others are opt-in through YTDL_PACE.
+PACES = {
+    "normal": ((1, 2), 1),
+    "careful": ((3, 6), 2),
+    "fast": ((0.5, 1), 0),
+}
+DEFAULT_PACE = "normal"
+
+
+def pace_profile(name=None):
+    """The pacing fields a request carries, for the profile `name` (the default for None or an
+    empty value). SelectionError, naming the accepted values, for any other."""
+    key = (name or "").strip().lower() or DEFAULT_PACE
+    if key not in PACES:
+        raise SelectionError(
+            f"YTDL_PACE={name} tidak dikenal. Pilih salah satu: {', '.join(PACES)}."
+        )
+    (low, high), requests = PACES[key]
+    return {"name": key, "file": [low, high], "requests": requests}
+
+
+def pace_of(request):
+    """The pacing of a worker request. A request without it (an older job, a test) or with
+    nonsense in it gets the default, so the worker never fails over this."""
+    value = request.get("pace")
+    try:
+        low, high = (float(x) for x in value["file"])
+        requests = float(value["requests"])
+        if all(math.isfinite(x) and x >= 0 for x in (low, high, requests)) and low <= high:
+            return {"name": str(value.get("name") or ""), "file": [low, high], "requests": requests}
+    except (TypeError, KeyError, ValueError):
+        pass
+    return pace_profile()

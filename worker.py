@@ -3,19 +3,64 @@
 import copy
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
 import sys
 import time
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from compat import deno_path, worker_start
 from pathlib import Path
 import yt_dlp
 from yt_dlp.networking import Request
 from yt_dlp.utils import ISO639Utils
-from model import container, basename, variant, classify
+from model import container, basename, variant, classify, pace_of
 from store import BASE, probe
+
+
+class Timings:
+    """How long each phase of one download took, by a monotonic clock, and how much of that time
+    was spent waiting on purpose (the pause between downloads, the pause before a retry).
+
+    The phases are metadata, video, audio, subtitle and finish (merge, check, move into place);
+    a phase that did not run is absent. The waits are counted inside the phase they happened
+    in, so the phases add up to the total apart from the start and the gaps between them."""
+
+    PHASES = ("metadata", "video", "audio", "subtitle", "finish")
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.began = clock()
+        self.seconds = {}
+        self.waits = {}
+        self.current = None
+        self.bytes = 0
+
+    @contextmanager
+    def phase(self, name):
+        before, self.current = self.current, name
+        started = self.clock()
+        try:
+            yield
+        finally:
+            self.seconds[name] = self.seconds.get(name, 0.0) + self.clock() - started
+            self.current = before
+
+    def waited(self, seconds):
+        self.waits[self.current] = self.waits.get(self.current, 0.0) + seconds
+
+    def report(self):
+        out = {name: round(self.seconds[name], 3) for name in self.PHASES if name in self.seconds}
+        out["total"] = round(self.clock() - self.began, 3)
+        out["waited"] = round(sum(self.waits.values()), 3)
+        out["bytes"] = self.bytes
+        # The average speed counts only the time the streams were not waiting.
+        busy = sum(
+            self.seconds.get(name, 0.0) - self.waits.get(name, 0.0) for name in ("video", "audio")
+        )
+        out["speed"] = round(self.bytes / busy, 1) if self.bytes and busy > 0.05 else None
+        return out
 
 
 class Events:
@@ -24,6 +69,7 @@ class Events:
         self.tick = 0
         self.stream_name = "media"
         self.started = False
+        self.timings = None
 
     def send(self, kind, **kwargs):
         self.stream.write(json.dumps({"type": kind, **kwargs}, ensure_ascii=True) + "\n")
@@ -51,11 +97,23 @@ class Events:
             self.send(
                 "file_done", downloaded=data.get("downloaded_bytes"), total=data.get("total_bytes")
             )
+            # A file that was already there finishes without ever having been downloaded.
+            if self.started and self.timings:
+                self.timings.bytes += data.get("downloaded_bytes") or data.get("total_bytes") or 0
             self.started = False
 
     def pp_hook(self, data):
         if data.get("status") == "started":
             self.send("stage", message="Memproses " + str(data.get("postprocessor", "media")))
+
+
+def wait(events, seconds, message):
+    """Tell the panel that the worker is waiting for `seconds`, and count the time as waiting in
+    the phase that is running."""
+    events.send("wait", until=time.time() + seconds, message=message)
+    timings = getattr(events, "timings", None)
+    if timings:
+        timings.waited(seconds)
 
 
 class Logger:
@@ -80,7 +138,7 @@ class Logger:
 def options(request, events):
     def retry_delay(n):
         seconds = min(30, 2**n)
-        events.send("wait", until=time.time() + seconds, message="Menunggu sebelum mencoba kembali")
+        wait(events, seconds, "Menunggu sebelum mencoba kembali")
         return seconds
 
     opts = {
@@ -94,9 +152,9 @@ def options(request, events):
         "fragment_retries": 4,
         "extractor_retries": 4,
         "socket_timeout": 30,
-        "sleep_interval": 1,
-        "max_sleep_interval": 2,
-        "sleep_interval_requests": 1,
+        # The pause before each file is made by the worker (pause_before_download), where the
+        # panel can show it; yt-dlp keeps the pause between the requests of one lookup.
+        "sleep_interval_requests": pace_of(request)["requests"],
         "writeautomaticsub": True,
         "cachedir": str(BASE / ".state/cache"),
         "js_runtimes": {"deno": {"path": str(deno_path(BASE))}},
@@ -265,9 +323,7 @@ def subtitle_files(info, item, root, events, opts):
                         value = headers.get("Retry-After")
                         if value and str(value).isdigit():
                             seconds = float(value)
-                        events.send(
-                            "wait", until=time.time() + seconds, message="Menunggu retry subtitle"
-                        )
+                        wait(events, seconds, "Menunggu retry subtitle")
                         time.sleep(seconds)
                 if error:
                     raise error
@@ -336,6 +392,28 @@ SELECTION_KEYS = ("requested_formats", "requested_downloads", "requested_subtitl
 STALE_LINK = re.compile(r"\b(403|404|410)\b")
 
 
+def stream_present(folder, stream):
+    """True when the temporary folder already holds the finished file of this stream. yt-dlp
+    then does not download it again, and does not pause before it either."""
+    return any(
+        path.is_file() and path.suffix not in (".part", ".ytdl")
+        for path in Path(folder).glob(f"*-{stream}.*")
+    )
+
+
+def pause_before_download(events, pace, sleep=time.sleep, uniform=random.uniform):
+    """The pause before a file that yt-dlp used to make without saying anything (sleep_interval):
+    a random time within the profile's range, shown in the panel as "Menunggu" with the time
+    left. Returns the seconds waited."""
+    low, high = pace["file"]
+    seconds = uniform(low, high)
+    if seconds < 0.05:
+        return 0.0
+    wait(events, seconds, "Menunggu · jeda antar-unduhan")
+    sleep(seconds)
+    return seconds
+
+
 def download_stream(opts, info, url):
     """One stream into the temporary folder, and the path of the file.
 
@@ -372,6 +450,7 @@ def remove_temporary(folder):
 
 
 def download(request, events):
+    timings = events.timings = Timings()
     item = request["item"]
     choice = item["choice"]
     root = Path(request["output"])
@@ -401,7 +480,7 @@ def download(request, events):
     temp_root.mkdir(parents=True, exist_ok=True)
     events.send("stage", message="Memeriksa format dan akses terbaru", phase="metadata")
     metadata_opts = {**opts, "skip_download": True}
-    with yt_dlp.YoutubeDL(metadata_opts) as ydl:
+    with timings.phase("metadata"), yt_dlp.YoutubeDL(metadata_opts) as ydl:
         info = ydl.extract_info(item["url"], download=False)
     if not info:
         raise ValueError("Informasi video kosong")
@@ -437,12 +516,16 @@ def download(request, events):
                 "writeautomaticsub": False,
                 "writesubtitles": False,
             }
-            filepath = download_stream(local, info, item["url"])
+            with timings.phase(stream):
+                if not stream_present(temp_root, stream):
+                    pause_before_download(events, pace_of(request))
+                filepath = download_stream(local, info, item["url"])
             if not Path(filepath).is_file():
                 raise ValueError("File sementara tidak ditemukan setelah download")
             paths[stream] = filepath
             paths[format_id] = filepath
-    subtitles, missing = subtitle_files(info, item, root, events, opts)
+    with timings.phase("subtitle"):
+        subtitles, missing = subtitle_files(info, item, root, events, opts)
     temp = target.with_name("." + target.stem + ".assembling." + extension)
     args = []
     if mode == "video-audio":
@@ -498,23 +581,31 @@ def download(request, events):
     if extension == "mp4":
         # Moves the index to the front so QuickTime, iOS and browsers can start playing at once.
         args += ["-movflags", "+faststart"]
-    try:
-        ffmpeg(
-            [*args, str(temp)],
-            events,
-            "Menggabungkan video + audio" if mode == "video-audio" else "Menyiapkan " + mode,
-        )
-        probe(temp, mode)
-        if target.exists() and not existing:
-            raise ValueError("Benturan nama setelah download; hasil lama tidak ditimpa")
-        temp.replace(target)
-    finally:
-        temp.unlink(missing_ok=True)
-    # The file is already in place. A temporary folder that something still holds open (a virus
-    # scanner or an indexer on Windows) is not a failed download: `clean` removes it later.
-    remove_temporary(temp_root)
+    with timings.phase("finish"):
+        try:
+            ffmpeg(
+                [*args, str(temp)],
+                events,
+                "Menggabungkan video + audio" if mode == "video-audio" else "Menyiapkan " + mode,
+            )
+            probe(temp, mode)
+            if target.exists() and not existing:
+                raise ValueError("Benturan nama setelah download; hasil lama tidak ditimpa")
+            temp.replace(target)
+        finally:
+            temp.unlink(missing_ok=True)
+        # The file is already in place. A temporary folder that something still holds open (a
+        # virus scanner or an indexer on Windows) is not a failed download: `clean` removes it
+        # later.
+        remove_temporary(temp_root)
     events.send("stage", message="Hasil akhir tersimpan")
-    return {"path": str(target), "mode": mode, "subtitles": subtitles, "missing": missing}
+    return {
+        "path": str(target),
+        "mode": mode,
+        "subtitles": subtitles,
+        "missing": missing,
+        "timings": timings.report(),
+    }
 
 
 def main():
