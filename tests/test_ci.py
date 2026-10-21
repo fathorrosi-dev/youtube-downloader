@@ -72,6 +72,46 @@ class Summary(unittest.TestCase):
         self.assertNotIn("line 100", report)
         self.assertIn("All tests passed", self.ci.summary("Tests linux", 0, [], lines))
 
+    def test_result_lines_of_every_kind_name_their_test(self):
+        for tail in ("ok", "FAIL", "ERROR", "skipped 'needs a console'", "expected failure"):
+            line = f"test_a (tests.test_x.A.test_a) ... {tail}\n"
+            self.assertEqual(self.ci.result_name(line), "test_a (tests.test_x.A.test_a)", tail)
+        for other in ("FAIL: test_a (t.A.test_a)\n", "Ran 3 tests in 1.0s\n", "OK\n", "\n"):
+            self.assertIsNone(self.ci.result_name(other), other)
+
+    def test_a_test_lasts_from_the_result_line_before_it_to_its_own(self):
+        stamped = [("test_a", 10.0), ("test_b", 10.5), ("test_c", 14.0), ("test_d", 14.25)]
+        # The first test has no line before it, so it has no time.
+        self.assertEqual(
+            self.ci.durations(stamped), [("test_b", 0.5), ("test_c", 3.5), ("test_d", 0.25)]
+        )
+        self.assertEqual(self.ci.durations([("test_a", 1.0)]), [])
+        self.assertEqual(self.ci.durations([]), [])
+
+    def test_the_ten_slowest_are_listed_longest_first(self):
+        timed = [(f"test_{n}", float(n % 7) + n / 100) for n in range(30)]
+        found = self.ci.slowest(timed)
+        self.assertEqual(len(found), 10)
+        self.assertEqual([s for _, s in found], sorted((s for _, s in found), reverse=True))
+        self.assertEqual(found[0][1], max(s for _, s in timed))
+        self.assertEqual(self.ci.slowest([("only", 1.0)]), [("only", 1.0)])
+        lines = self.ci.slow_lines([("test_slow (m.A.test_slow)", 12.8), ("test_fast", 0.5)])
+        self.assertEqual(lines[0], "  12.80 s  test_slow (m.A.test_slow)")
+        self.assertEqual(lines[1], "   0.50 s  test_fast")
+
+    def test_the_summary_lists_the_slowest_tests_whether_the_run_passed_or_not(self):
+        timed = [("test_slow (m.A.test_slow)", 12.8), ("test_fast (m.A.test_fast)", 0.5)]
+        passed = self.ci.summary("Tests linux", 0, [], [], timed)
+        self.assertIn("All tests passed", passed)
+        self.assertIn("Slowest 2 tests", passed)
+        self.assertLess(passed.index("test_slow"), passed.index("test_fast"))
+        failed = self.ci.summary(
+            "Tests linux", 1, [("FAIL", "test_b (m.A.test_b)")], ["x\n"], timed
+        )
+        self.assertIn("1 failing test(s)", failed)
+        self.assertIn("12.80 s  test_slow", failed)
+        self.assertNotIn("Slowest", self.ci.summary("Tests linux", 0, [], []))  # nothing timed
+
     def run_script(self, code, **env):
         with tempfile.TemporaryDirectory() as folder:
             summary = Path(folder) / "summary.md"
@@ -107,6 +147,22 @@ class Summary(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertIn("::error title=demo::the command exited with code 3", result.stdout)
         self.assertIn("Exit code 3", summary)
+
+    def test_a_run_names_its_slowest_test_in_the_log_and_in_the_summary(self):
+        code = (
+            "import time\n"
+            "for name, wait in (('a', 0), ('b', 0), ('slow', 0.4), ('c', 0)):\n"
+            "    time.sleep(wait)\n"
+            "    print(f'test_{name} (t.A.test_{name}) ... ok', flush=True)\n"
+        )
+        result, summary = self.run_script(code)
+        self.assertEqual(result.returncode, 0)
+        for shown in (result.stdout, summary):
+            listed = shown[shown.index("Slowest 3 tests") :]
+            self.assertLess(listed.index("test_slow"), listed.index("test_c"), shown)
+            self.assertIn("test_b", listed)
+            self.assertNotIn("test_a (", listed)  # the first test has no time
+        self.assertNotIn("::error", result.stdout)
 
     def test_a_passing_run_is_quiet_and_exits_zero(self):
         result, summary = self.run_script("print('ok')")
