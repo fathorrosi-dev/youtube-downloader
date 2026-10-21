@@ -235,6 +235,17 @@ class FfmpegForWindows(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name)
+        # main() puts Chocolatey's folder first on PATH before it looks. On a Windows runner that
+        # folder already holds the tools the "FFmpeg Windows" step installed, so a test that meant
+        # to look only at its own folder found those instead. Every test here gets an empty one.
+        chocolatey = patch.object(self.ff, "CHOCO_BIN", str(self.root / "chocolatey-bin"))
+        chocolatey.start()
+        self.addCleanup(chocolatey.stop)
+
+    def handed_on(self):
+        """The folders that main() wrote to $GITHUB_PATH, as paths."""
+        lines = (self.root / "gh").read_text(encoding="utf-8").splitlines()
+        return [Path(line) for line in lines]
 
     def program(self, folder, name):
         """An executable stand-in that shutil.which finds on Windows and elsewhere."""
@@ -423,7 +434,24 @@ class FfmpegForWindows(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(calls, [])
-        self.assertEqual((self.root / "gh").read_text(encoding="utf-8"), f"{folder}\n")
+        self.assertEqual(self.handed_on(), [folder])
+
+    def test_tools_that_chocolatey_already_put_in_its_folder_are_found_there(self):
+        # The state of a Windows runner when the tests run: the "FFmpeg Windows" step has filled
+        # Chocolatey's folder, and PATH of this step does not have to name it.
+        chocolatey = Path(self.ff.CHOCO_BIN)
+        self.tools_in(chocolatey)
+        calls = []
+        code, _ = self.quiet(
+            self.ff.main,
+            self.environment(),
+            via_chocolatey=lambda path: calls.append("choco"),
+            via_download=lambda target: calls.append("download"),
+            check=lambda program: True,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.handed_on(), [chocolatey])
 
     def test_a_download_is_the_fallback_and_its_folder_reaches_the_next_steps(self):
         folder = self.root / "unpacked" / "bin"
@@ -472,6 +500,7 @@ class FfmpegForWindows(unittest.TestCase):
         )
         self.assertEqual(code, 1)
         self.assertIn("-version did not run", shown)
+        self.assertIn(str(folder), shown)  # the tool tried is the one in this test's folder
         self.assertFalse((self.root / "gh").exists())
 
     def test_without_github_path_the_folders_are_only_named(self):
