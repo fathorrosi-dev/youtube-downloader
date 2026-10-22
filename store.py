@@ -153,6 +153,17 @@ def probe(path, mode):
     return data
 
 
+def fingerprint(path, mode):
+    """What a file looked like when ffprobe accepted it for this mode (size and modification time
+    in nanoseconds), or None when it cannot be read. Not a checksum: a file replaced by another
+    of the same size and the same modification time is not noticed."""
+    try:
+        info = Path(path).stat()
+    except OSError:
+        return None
+    return {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "mode": mode}
+
+
 class Archive:
     def __init__(self):
         STATE.mkdir(parents=True, exist_ok=True)
@@ -169,30 +180,42 @@ class Archive:
         """The usable earlier result of this variant, or None. A record that cannot be read (a
         damaged row, a missing ffprobe) is noted in the log and skipped; it never stops the
         batch, because the file is simply downloaded again."""
-        for row in self.db.execute(
-            "SELECT payload FROM results WHERE variant=? ORDER BY rowid DESC", (key,)
-        ):
+        rows = self.db.execute(
+            "SELECT rowid,payload FROM results WHERE variant=? ORDER BY rowid DESC", (key,)
+        ).fetchall()
+        for rowid, payload in rows:
             try:
-                result = self._usable(row[0], mode, output)
+                result, seen = self._usable(payload, mode, output)
             except (OSError, KeyError, ValueError, TypeError, AttributeError) as exc:
                 log_note(f"Catatan arsip dilewati ({type(exc).__name__}: {exc})")
                 continue
             if result:
+                if seen:
+                    self._remember(rowid, payload, seen)
                 return result
         return None
 
     @staticmethod
     def _usable(payload, mode, output):
+        """(the record, None) when the file is trusted by its fingerprint, (the record, the
+        fingerprint to write down) when ffprobe had to accept it, (None, None) when it is not
+        usable. A record without a fingerprint (written by an earlier version) or with one that no
+        longer matches the file is checked with ffprobe, as every record used to be."""
         result = json.loads(payload)
         path = Path(result["path"])
+        recorded = result.pop("fingerprint", None)  # an implementation detail, not a result field
         if output and not path.resolve().is_relative_to(Path(output).resolve()):
-            return None
+            return None, None
         if not path.is_file():
-            return None
-        try:
-            probe(path, mode)
-        except (ValueError, subprocess.SubprocessError):
-            return None
+            return None, None
+        current = fingerprint(path, mode)  # before the probe: a change during it shows up later
+        seen = None
+        if current is None or recorded != current:
+            try:
+                probe(path, mode)
+            except (ValueError, subprocess.SubprocessError):
+                return None, None
+            seen = current
         missing = [
             track for track in result.get("subtitles", []) if not Path(track["path"]).is_file()
         ]
@@ -200,12 +223,32 @@ class Archive:
             result["missing"] = list(
                 {x["key"]: x for x in result.get("missing", []) + missing}.values()
             )
-        return result
+        return result, seen
+
+    def _remember(self, rowid, payload, seen):
+        """Writes the fingerprint into a record that ffprobe has just accepted, so the next
+        resume does not run it again. Best effort: the record is usable either way."""
+        try:
+            record = json.loads(payload)
+            record["fingerprint"] = seen
+            with self.db:
+                self.db.execute(
+                    "UPDATE results SET payload=? WHERE rowid=?",
+                    (json.dumps(record, ensure_ascii=False), rowid),
+                )
+        except (sqlite3.Error, ValueError, TypeError) as exc:
+            log_note(f"Catatan arsip tidak diperbarui ({type(exc).__name__}: {exc})")
 
     def put(self, key, result):
+        seen = fingerprint(result["path"], result["mode"])  # before the probe, as in _usable
         probe(result["path"], result["mode"])
+        record = {**result, "fingerprint": seen} if seen else result
         with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO results VALUES (?,?,?)",
-                (key, str(Path(result["path"]).resolve()), json.dumps(result, ensure_ascii=False)),
+                (
+                    key,
+                    str(Path(result["path"]).resolve()),
+                    json.dumps(record, ensure_ascii=False),
+                ),
             )

@@ -296,6 +296,32 @@ class Portable(unittest.TestCase):
             (self.new / "video/a.mp4").unlink()
             self.assertIsNone(archive.get("v", "video", self.new))
 
+    def test_rebase_keeps_the_fingerprint_and_a_file_copied_with_its_times_is_trusted(self):
+        old = "/old/YouTube"
+        self.prepare_rebase(old)
+        target = self.new / "video/a.mp4"
+        info = target.stat()
+        fingerprint = {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "mode": "video"}
+        with closing(sqlite3.connect(self.state / "downloaded.sqlite3")) as db:
+            row = db.execute("SELECT rowid,payload FROM results").fetchone()
+            payload = {**json.loads(row[1]), "fingerprint": fingerprint}
+            db.execute("UPDATE results SET payload=? WHERE rowid=?", (json.dumps(payload), row[0]))
+            db.commit()
+        with redirect_stdout(io.StringIO()):
+            media_migration.rebase_media(self.root, old, str(self.new))
+        with closing(sqlite3.connect(self.state / "downloaded.sqlite3")) as db:
+            moved = json.loads(db.execute("SELECT payload FROM results").fetchone()[0])
+        self.assertEqual(moved["fingerprint"], fingerprint)
+        self.assertEqual(moved["path"], str(target))
+        archive = store.Archive()
+        self.addCleanup(archive.close)
+        with patch.object(store, "probe") as probe:
+            self.assertIsNotNone(archive.get("v", "video", self.new))
+            probe.assert_not_called()
+            target.write_bytes(b"media, changed")
+            self.assertIsNotNone(archive.get("v", "video", self.new))
+            probe.assert_called_once()
+
     def test_rebase_missing_file_preserves_records(self):
         old = "/old/YouTube"
         self.prepare_rebase(old)
