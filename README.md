@@ -9,6 +9,7 @@ CLI Python untuk video YouTube, Shorts, dan playlist: pilihan resolusi asli + au
 - Resume (`resume` memilih job, `resume --last`), arsip varian, self-update rilis stabil dengan backup/rollback, migrasi jalur lintas OS.
 - Mode skrip: semua pertanyaan wizard punya flag, `--yes` berjalan tanpa terminal, `--links-file` untuk banyak link, path hasil ke stdout, `status --json`.
 - `status` menampilkan umur yt-dlp dan ukuran `.state`; `clean` membersihkan sisa dengan aman, `clean --abandoned` juga folder sementara job yang ditinggalkan.
+- Jeda antar-unduhan tampil sebagai hitungan mundur "Menunggu" dan bisa dipilih dengan `YTDL_PACE` (`normal`, `careful`, `fast`); waktu tiap fase per item dicatat di job dan dilihat dengan `status --timings`.
 
 Baca [PANDUAN.md](PANDUAN.md) dan [MIGRASI.md](MIGRASI.md). Laporan pengujian ([docs/TEST-REPORT.md](docs/TEST-REPORT.md)), catatan pemasangan, dan pratinjau berada di folder `docs/` pada repo; folder itu tidak ikut paket rilis. Paket ini tidak berisi settings pribadi, cookie, job, database, media, environment Python, atau binary runtime terpasang.
 
