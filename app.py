@@ -842,6 +842,13 @@ def wizard(ui, url, browser=None, output=None, preset=None):
     return job
 
 
+# Items found already in the archive are only noted in the job file every so often: rewriting the
+# whole file for each of thousands of them grows with the square of the batch. The status of a
+# skipped item is not needed from the file: execute asks the archive about every item again.
+SKIP_CHECKPOINT_ITEMS = 50
+SKIP_CHECKPOINT_SECONDS = 5.0
+
+
 def execute(ui, job):
     native_output(job["output"])
     if job.get("browser") and (
@@ -855,6 +862,13 @@ def execute(ui, job):
     consecutive = 0
     job["status"] = "running"
     save_job(job)
+    unsaved, saved_at = 0, time.monotonic()
+
+    def checkpoint():
+        nonlocal unsaved, saved_at
+        save_job(job)
+        unsaved, saved_at = 0, time.monotonic()
+
     try:
         with Session(ui, len(job["items"]), job["items"]) as session:
             try:
@@ -865,7 +879,12 @@ def execute(ui, job):
                         item["status"] = "complete"
                         item["result"] = previous
                         session.item_end("skipped")
-                        save_job(job)
+                        unsaved += 1
+                        if (
+                            unsaved >= SKIP_CHECKPOINT_ITEMS
+                            or time.monotonic() - saved_at >= SKIP_CHECKPOINT_SECONDS
+                        ):
+                            checkpoint()
                         consecutive = 0
                         continue
                     request = {
@@ -878,7 +897,7 @@ def execute(ui, job):
                     if previous:
                         request["existing_file"] = previous["path"]
                     item["status"] = "running"
-                    save_job(job)
+                    checkpoint()
                     session.item_start(phases(item))
                     began = time.monotonic()
                     try:
@@ -923,7 +942,7 @@ def execute(ui, job):
                             consecutive += 1
                         else:
                             consecutive = 0
-                        save_job(job)
+                        checkpoint()
                         if exc.category in ("authentication", "rate_limit") or consecutive >= 3:
                             job["status"] = "blocked"
                             raise Stopped(
@@ -932,7 +951,7 @@ def execute(ui, job):
                                 login=exc.category == "authentication",
                                 category=exc.category,
                             ) from exc
-                    save_job(job)
+                    checkpoint()
             except (KeyboardInterrupt, Cancelled):
                 job["status"] = "interrupted"
                 raise
