@@ -1,7 +1,6 @@
 """How job files reach the disk (the same bytes as ever, written once, replaced atomically) and how
 the archive decides that a file it recorded is still the one it accepted."""
 
-import io
 import json
 import os
 import shutil
@@ -38,15 +37,19 @@ class WriteJson(unittest.TestCase):
         self.root = Path(folder.name)
 
     def test_the_bytes_are_those_of_the_json_dump_it_replaces(self):
-        # A job file written before and after this change must be the same file.
+        # A job file written before and after this change must be the same file. The old way is
+        # written to a real text-mode file, not to a StringIO, so that the newline translation of
+        # the platform (CRLF on Windows) applies to the expectation as it does to write_json.
         value = job(40)
-        old = io.StringIO()
-        json.dump(value, old, ensure_ascii=False, indent=2)
-        old.write("\n")
+        expected = self.root / "expected.json"
+        with expected.open("w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
         path = self.root / "jobs" / "abc.json"
         store.write_json(path, value)
-        self.assertEqual(path.read_bytes(), old.getvalue().encode("utf-8"))
-        self.assertTrue(path.read_bytes().endswith(b"}\n"))
+        self.assertEqual(path.read_bytes(), expected.read_bytes())
+        # read_text turns CRLF back into LF, so this holds on every platform.
+        self.assertTrue(path.read_text(encoding="utf-8").endswith("}\n"))
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), value)
 
     def test_the_file_is_flushed_to_disk_and_replaced_in_one_step(self):
