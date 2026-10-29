@@ -16,6 +16,7 @@ from rich.progress import Progress, ProgressColumn, TextColumn
 from rich.table import Table, Column
 from rich.text import Text
 import questionary
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.output import ColorDepth
 from compat import configure_terminal, stdout_is_console, windows_build
 from model import codec_name
@@ -426,6 +427,20 @@ ROW_TITLES = {
     "skip": DIM,
 }
 MAX_REPORT_ROWS = 30
+# The line under a list when Enter was pressed with nothing ticked.
+EMPTY_CHOICE = (
+    "Belum ada yang dicentang · Space mencentang baris yang disorot, lalu Enter · Ctrl+C batal"
+)
+
+
+def without_bulk_keys(question):
+    """Make Ctrl+A (tick every row) and Tab (invert) do nothing in a questionary checkbox.
+
+    questionary binds them itself and offers no switch to remove them. A binding added later wins
+    over an earlier one for the same key."""
+    bindings = question.application.key_bindings
+    for key in (Keys.ControlA, Keys.ControlI):
+        bindings.add(key, eager=True)(lambda event: None)
 
 
 class UI:
@@ -475,6 +490,12 @@ class UI:
                     ("highlighted", BLUE),
                     ("selected", PINK),
                     ("instruction", DIM),
+                    # What is typed into a list to search it, and the line under the list when
+                    # Enter was refused. questionary's own colours (green, red on white) are not
+                    # the palette's; refusing is not a failure of the download, so it is blue.
+                    ("search_success", BLUE),
+                    ("search_none", RED),
+                    ("validation-toolbar", BLUE),
                 ]
             )
             if not self.no_color
@@ -797,9 +818,17 @@ class UI:
         self._answered(label or title, result, step)
         return result
 
-    def checkboxes(self, title, options, checked=()):
+    def checkboxes(self, title, options, checked=(), step=None, required=False, bulk=True):
+        """Pick any number of `options` (pairs of text and value); the values picked, in list order.
+
+        Typing filters the list and never changes what is ticked: Space ticks the highlighted
+        row. `required` refuses Enter while nothing is ticked, because an empty answer to a list
+        that was asked for is a missed Space and not a choice; the numbered form still takes
+        `none`. `bulk` keeps Ctrl+A (every row) and Tab (invert) for a list where that is a
+        sensible thing to do; for a list of 150 languages it is a way to ask for all of them by
+        accident."""
         if self.numbered:
-            self.say(title, BLUE)
+            self.say(self._message(title, step), BLUE)
             kept = [value for _, value in options if value in checked]
             for i, (text, value) in enumerate(options, 1):
                 self.say(f"{i}. {'[x] ' if value in kept else ''}{text}")
@@ -818,23 +847,32 @@ class UI:
                     return [options[i][1] for i in item_indices(answer, len(options))]
                 except ValueError as exc:
                     self.say(exc, RED)
-        picked = self._ask(
-            questionary.checkbox(
-                title,
-                choices=[
-                    questionary.Choice(text, value=i, checked=value in checked)
-                    for i, (text, value) in enumerate(options)
-                ],
-                qmark=self.glyph["step"],
-                pointer=self.glyph["pointer"],
-                style=self.style,
-                instruction="Space pilih · Enter lanjut · Ctrl+C batal",
-                color_depth=self.depth,
-            )
+        keys = "↑↓ pindah · Space centang · ketik untuk mencari"
+        keys += " · Ctrl+A semua · Tab balik" if bulk else ""
+        question = questionary.checkbox(
+            self._message(title, step),
+            choices=[
+                questionary.Choice(text, value=i, checked=value in checked)
+                for i, (text, value) in enumerate(options)
+            ],
+            qmark=self.glyph["step"],
+            pointer=self.glyph["pointer"],
+            style=self.style,
+            instruction=keys + " · Enter lanjut · Ctrl+C batal",
+            validate=(lambda picked: True if picked or not required else EMPTY_CHOICE),
+            # Typing searches. Without it questionary reads `i` and `a` as "invert" and "select
+            # all", and typing a language into a list of 150 ticks every one of them. The search
+            # cannot share its letters with j/k, so those no longer move the pointer.
+            use_search_filter=True,
+            use_jk_keys=False,
+            color_depth=self.depth,
         )
+        if not bulk:
+            without_bulk_keys(question)
+        picked = self._ask(question)
         names = [options[i][0] for i in picked]
         summary = "tidak ada" if not names else ", ".join(names) if len(names) <= 3 else None
-        self._answered(title, summary or f"{len(names)} dipilih")
+        self._answered(title, summary or f"{len(names)} dipilih", step)
         return [options[i][1] for i in picked]
 
 

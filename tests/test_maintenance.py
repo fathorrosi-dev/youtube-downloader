@@ -126,7 +126,7 @@ class Wizard(unittest.TestCase):
             def choose(self, *args, **kw):
                 return next(self.answers)
 
-            def checkboxes(self, label, choices):
+            def checkboxes(self, label, choices, **kw):
                 return [v for _, v in choices]
 
             def say(self, *args):
@@ -169,7 +169,7 @@ class Wizard(unittest.TestCase):
                 self.prompts.append((label, step))
                 return next(self.answers)
 
-            def checkboxes(self, label, choices):
+            def checkboxes(self, label, choices, **kw):
                 return []
 
             def say(self, *args):
@@ -242,7 +242,7 @@ class Wizard(unittest.TestCase):
                 self.offered[label] = [text for text, _ in options]
                 return next(self.answers)
 
-            def checkboxes(self, label, choices):
+            def checkboxes(self, label, choices, **kw):
                 return [v for _, v in choices] if checked else []
 
             def say(self, *args):
@@ -358,7 +358,7 @@ class Wizard(unittest.TestCase):
             def choose(self, *args, **kw):
                 return next(self.answers)
 
-            def checkboxes(self, label, choices):
+            def checkboxes(self, label, choices, **kw):
                 return []
 
             def say(self, *args):

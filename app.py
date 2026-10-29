@@ -279,7 +279,9 @@ def pick_entries(ui, initial, preset):
             selected = entries
         elif selection == "checkbox":
             selected = ui.checkboxes(
-                "Item playlist", [(f"{i + 1}. {e['title']}", e) for i, e in enumerate(entries)]
+                "Item playlist",
+                [(f"{i + 1}. {e['title']}", e) for i, e in enumerate(entries)],
+                required=True,
             )
         else:
             while True:
@@ -521,7 +523,12 @@ def ask_subtitles(ui, preset, mode, compatible, metadata, all_tracks, step, prev
         for identity, t in all_tracks.items()
     ]
     extra = {"checked": previous["chosen"]} if previous and previous.get("chosen") else {}
-    return ui.checkboxes("Track subtitle", options, **extra), True
+    # Enter with nothing ticked is refused: this person said yes to subtitles a moment ago, so an
+    # empty list is a missed Space. Ctrl+A is off because ticking all of a hundred and fifty
+    # languages is never what was meant.
+    return ui.checkboxes(
+        "Track subtitle", options, step=step, required=True, bulk=False, **extra
+    ), True
 
 
 def ask_settings(ui, metadata, all_tracks, preset, previous=None):

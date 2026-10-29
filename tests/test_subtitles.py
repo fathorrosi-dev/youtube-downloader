@@ -1,7 +1,10 @@
 """The subtitle choice with the captions a real video has (a hundred and fifty translations a
 track), not the one or two the other tests give it."""
 
+import json
+import re
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -11,6 +14,7 @@ import testenv  # noqa: F401
 import app
 import model
 import captions
+from terminal import Terminal
 
 
 class Shape(unittest.TestCase):
@@ -59,6 +63,133 @@ class Shape(unittest.TestCase):
         self.assertEqual([merged[identity]["language"] for identity in chosen], ["id"])
         english, _ = app.subtitle_identities(merged, ["en-US"])
         self.assertEqual(merged[english[0]]["kind"], "manual")
+
+
+ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[=>])")
+DOWN, ENTER, SPACE, TAB, CTRL_A, CTRL_C = "\x1b[B", "\r", " ", "\t", "\x01", "\x03"
+
+
+def screen_text(raw):
+    """What was written to the terminal, without the escape sequences."""
+    return ESCAPES.sub("", raw)
+
+
+CPR = "\x1b[6n"
+
+
+def read(term, seconds):
+    """What the terminal has written. prompt_toolkit asks where the cursor is before it draws the
+    line under a list (the reason Enter was refused is shown there); a terminal answers, so this
+    one does, with the first row."""
+    chunk = term.read(seconds)
+    if CPR in chunk:
+        term.write("\x1b[1;1R")
+    return chunk
+
+
+def ask(script, steps, timeout=30):
+    """Run `script` on a real pseudo-terminal and play `steps` into it: a key to press, or
+    ("shows", text) to wait until the text has appeared. Returns what the script printed."""
+    raw = ""
+    deadline = time.monotonic() + timeout
+    with Terminal([sys.executable, "-c", script], BASE) as term:
+        for step in steps:
+            if isinstance(step, tuple):
+                while step[1] not in screen_text(raw):
+                    if time.monotonic() > deadline or not term.running():
+                        raise AssertionError(f"never showed {step[1]!r}: {screen_text(raw)!r}")
+                    raw += read(term, 0.1)
+            else:
+                # prompt_toolkit has to finish painting before it can read the key
+                raw += read(term, 0.2)
+                term.write(step)
+        while term.running() and time.monotonic() < deadline:
+            raw += read(term, 0.1)
+        raw += term.drain()
+        if term.running():
+            raise AssertionError("the menu did not end: " + repr(screen_text(raw)))
+        term.wait()
+    return screen_text(raw)
+
+
+def menu(required=True, bulk=False):
+    """A script that shows the 156 translation languages as a list and prints what was picked."""
+    return (
+        "import json, sys\n"
+        "sys.path.insert(0, 'tests')\n"
+        "import captions\n"
+        "from ui import UI, Cancelled\n"
+        "options = [(name + ' · Terjemahan otomatis', code) for code, name in captions.TRANSLATIONS]\n"
+        "try:\n"
+        "    picked = UI().checkboxes('Track subtitle', options, step=(4, 5), "
+        f"required={required}, bulk={bulk})\n"
+        "    print('RESULT', json.dumps(picked))\n"
+        "except KeyboardInterrupt:\n"
+        "    print('CANCELLED')\n"
+    )
+
+
+def result(output):
+    found = re.findall(r"RESULT (\[.*?\])", output)
+    return json.loads(found[-1]) if found else None
+
+
+class Menu(unittest.TestCase):
+    """The checkbox menu on a pseudo-terminal, with a list as long as a real video's."""
+
+    refused = "Belum ada yang dicentang"
+
+    def test_enter_with_nothing_ticked_is_refused_and_says_how_to_tick(self):
+        # The way the tool was used when it gave "Track subtitle: tidak ada": arrow to a row,
+        # Enter, never Space.
+        out = ask(
+            menu(),
+            [("shows", "Track subtitle"), DOWN, DOWN, ENTER, ("shows", self.refused), CTRL_C],
+        )
+        self.assertIn("CANCELLED", out)
+        self.assertIsNone(result(out))
+        self.assertNotIn("tidak ada", out)
+
+    def test_the_menu_carries_the_step_number_like_every_other_prompt(self):
+        out = ask(menu(), [("shows", "4/5  Track subtitle"), CTRL_C])
+        self.assertIn("CANCELLED", out)
+
+    def test_space_then_enter_returns_the_ticked_row_and_only_that(self):
+        out = ask(menu(), [("shows", "Track subtitle"), DOWN, DOWN, SPACE, ENTER])
+        self.assertEqual(result(out), [captions.TRANSLATIONS[2][0]])
+
+    def test_typing_a_language_searches_the_list_and_ticks_nothing(self):
+        # Typing "indonesia" used to press i (invert), a (all) and the letters between: all
+        # 156 languages came back ticked.
+        out = ask(
+            menu(),
+            [("shows", "Track subtitle")] + list("indonesia") + [SPACE, ENTER],
+        )
+        self.assertEqual(result(out), ["id"])
+
+    def test_the_letters_that_used_to_select_everything_select_nothing(self):
+        out = ask(
+            menu(),
+            [("shows", "Track subtitle"), "i", "a", ENTER, ("shows", self.refused), CTRL_C],
+        )
+        self.assertIsNone(result(out))
+        self.assertIn("CANCELLED", out)
+
+    def test_ctrl_a_and_tab_do_nothing_in_a_list_that_turns_them_off(self):
+        out = ask(
+            menu(bulk=False),
+            [("shows", "Track subtitle"), CTRL_A, TAB, ENTER, ("shows", self.refused), CTRL_C],
+        )
+        self.assertIsNone(result(out))
+        self.assertNotIn("Ctrl+A", out.split("Belum ada")[0])
+
+    def test_ctrl_a_ticks_every_row_in_a_list_that_keeps_it(self):
+        out = ask(menu(required=False, bulk=True), [("shows", "Ctrl+A semua"), CTRL_A, ENTER])
+        self.assertEqual(len(result(out)), len(captions.TRANSLATIONS))
+
+    def test_a_list_that_does_not_require_an_answer_accepts_none_ticked(self):
+        out = ask(menu(required=False), [("shows", "Track subtitle"), ENTER])
+        self.assertEqual(result(out), [])
 
 
 if __name__ == "__main__":
