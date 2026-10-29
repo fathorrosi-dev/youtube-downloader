@@ -4,7 +4,7 @@ Program dan catatan berada dalam folder tools; media terpisah. Semua tindakan me
 
 ## Pindah folder pada perangkat yang sama
 
-Tujuan harus kosong di luar sumber. Migrasi menyalin program/settings/job/arsip/cadangan/file parsial, mengecualikan `.venv`, dan membuat ulang environment. Runtime hanya dipakai kembali jika metadata platform sesuai dan pemeriksaan versinya berhasil. Sumber tetap ada; media tetap di tempat semula.
+Tujuan harus kosong di luar sumber. Migrasi menyalin program/settings/job/arsip/cadangan/file parsial, mengecualikan `.venv` dan membuat ulang environment. Di `.state` tidak ikut disalin sisa yang dibuat ulang otomatis dan juga dibersihkan perintah `clean`: lingkungan Python lama (`venv-before-move-*`), `pip-cache`, dan `cache`. Cadangan program untuk rollback ikut disalin. Runtime hanya dipakai kembali jika metadata platform sesuai dan pemeriksaan versinya berhasil. Sumber tetap ada; media tetap di tempat semula.
 
 ```bash
 cd /jalur/tools-lama
@@ -19,7 +19,7 @@ Windows PowerShell: `.\migrate.cmd "$HOME\tools\youtube-downloader"`, lalu `.\se
 
 ## Pindah perangkat atau OS
 
-1. Tunggu proses selesai. Salin seluruh paket termasuk file tersembunyi, settings dan `.state`. Kecualikan `.venv`, `.runtime`, `__pycache__`, `.git`, serta `run.lock`. `.bootstrap`, lock dependensi, runtime/release metadata, launcher, dan program wajib ikut.
+1. Tunggu proses selesai. Salin seluruh paket termasuk file tersembunyi, settings dan `.state`. Kecualikan `.venv`, `.runtime`, `__pycache__`, `.git`, serta `run.lock` (dan boleh juga `.state/venv-before-move-*`, `.state/pip-cache`, `.state/cache`). `.bootstrap`, lock dependensi, runtime/release metadata, launcher, dan program wajib ikut.
 2. Salin **media terpisah** ke folder tujuan yang diinginkan. Pertahankan subfolder `video`, `audio`, `subtitle` dan nama file. Tidak ada konversi atau perubahan kualitas.
 3. Pasang Python standar 3.11–3.14 dan FFmpeg/FFprobe sesuai PANDUAN.md. Jalankan setup pada perangkat tujuan untuk environment dan Deno OS/arsitektur yang benar. Jangan memakai environment/binary Linux di Windows/macOS.
 4. Jalur dalam job dan arsip bersifat absolut. Bila akar media berubah, jalankan `rebase-media` di bawah sebelum resume.

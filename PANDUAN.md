@@ -70,7 +70,7 @@ bash setup.sh --check
 
 Atau jalankan `./youtube-downloader` lalu tempel link ketika diminta. URL Shorts dan playlist memakai perintah yang sama. Pakai tanda kutip pada link, terutama yang mengandung `&`.
 
-Panah atas/bawah memilih, Enter mengonfirmasi, Space mencentang subtitle/item playlist. Ctrl+C membatalkan. Tidak ada download sebelum ringkasan terakhir disetujui. `--plain` mengganti menu dengan nomor dan download dengan teks singkat:
+Panah atas/bawah memilih, Enter mengonfirmasi, Space mencentang subtitle/item playlist. Enter pada daftar yang belum dicentang apa pun ditolak dengan pesan di bawah daftar (bukan dianggap "tanpa subtitle"), dan mengetik pada daftar subtitle hanya mencari, tidak pernah mencentang. Ctrl+C membatalkan. Tidak ada download sebelum ringkasan terakhir disetujui. `--plain` mengganti menu dengan nomor dan download dengan teks singkat:
 
 ```bash
 ./youtube-downloader --plain 'https://www.youtube.com/shorts/ID_VIDEO'
@@ -92,11 +92,11 @@ Wizard memerlukan terminal untuk menjawab menu, kecuali semua jawabannya diberik
 
 1. Tools mengambil judul, durasi, kanal, ukuran asli, dan format yang tersedia. Link video yang juga memuat playlist menawarkan video saja atau playlist.
 2. Playlist menawarkan semua item, checkbox, atau nomor/rentang seperti `1,3,5-10`. Metadata tiap item diperiksa sebelum ringkasan, tiga item sekaligus; urutan hasil dan perilaku saat dihentikan tidak berubah dibanding satu per satu. Video private/deleted dapat dilewati.
-3. Pilih **Video + audio**, **Audio saja**, atau **Video saja — tanpa suara**.
+3. Pilih **Video + audio**, **Audio saja**, **Video saja — tanpa suara**, atau **Subtitle saja — tanpa video dan audio** (pilihan ini hanya muncul bila video punya subtitle; lihat bagian Subtitle).
 4. Untuk video, pilih dulu **Format file**: *Otomatis* atau *MP4 kompatibel* (lihat bagian Hasil video + audio). Setelah itu video menawarkan kualitas maksimal, resolusi asli yang tersedia, atau pemilihan format detail per item. Tidak ada upscale. Pada playlist, target yang tidak tersedia turun ke resolusi terbaik di bawah target; perubahan terlihat dalam ringkasan. Item yang tidak memiliki resolusi di bawah target dilewati.
 5. Pilih bahasa asli per video atau bahasa audio/dub yang benar-benar tersedia. Jika dub pilihan tidak ada pada item playlist, item itu dilewati; tools tidak mengganti bahasa diam-diam. `und` berarti YouTube tidak memberi identitas bahasa.
 6. Audio saja menawarkan **audio asli terbaik** tanpa konversi atau **MP3** dengan konversi lossy. Bisa memilih format/bitrate secara detail.
-7. Subtitle bersifat opsional. Pilih satu atau beberapa track, lalu tinjau ringkasan judul, kualitas, FPS, SDR/HDR, container, audio, perkiraan ukuran, dan tujuan file.
+7. Subtitle bersifat opsional: jawab **Tanpa subtitle** atau pilih satu atau beberapa track (cara memilihnya ada di bagian Subtitle). Lalu tinjau ringkasan judul, kualitas, FPS, SDR/HDR, container, audio, perkiraan ukuran, subtitle, dan tujuan file. Ringkasan selalu menyebut subtitle, termasuk "tanpa subtitle" bila video punya subtitle yang tidak dipilih.
 8. Pilih **Mulai**, **Ubah pilihan**, atau Batal. *Ubah pilihan* kembali ke pertanyaan pertama dengan jawaban sebelumnya sudah terpilih; info video dan playlist tidak diambil ulang. Pertanyaan yang tadinya dijawab oleh flag (misalnya `--quality 1080`) ikut ditanyakan lagi, dengan jawaban dari flag itu sudah terpilih. Setelah Mulai, ID job langsung disimpan agar proses dapat dilanjutkan.
 
 Setiap jawaban tetap tertinggal di layar sebagai satu baris riwayat, misalnya `◆ 2/5 Kualitas  1080p`: simbol pink, nomor langkah redup, label biru, jawaban pink. Pilihan jenis unduhan tidak bernomor karena menentukan berapa langkah yang menyusul, sehingga setiap nomor yang tampil akurat. Ringkasan satu video berbentuk kartu (judul, kualitas, berkas, folder tujuan); playlist berbentuk tabel dengan judul yang dipotong dan diakhiri `…`. Dengan `--plain` simbol diganti ASCII (`[2/5] Kualitas: 1080p`).
@@ -115,12 +115,12 @@ berkas=$(./youtube-downloader 'LINK' --yes)   # path hasil, satu per baris
 
 | Flag | Menjawab | Bawaan di bawah `--yes` |
 | --- | --- | --- |
-| `--mode video-audio\|audio\|video` | Unduh apa? | `video-audio` |
+| `--mode video-audio\|audio\|video\|subtitle` | Unduh apa? | `video-audio` |
 | `--format auto\|mp4` | Format file (`mp4` = MP4 kompatibel) | `auto` |
 | `--quality best\|TINGGI` | Kualitas, misalnya `1080` | `best` |
 | `--lang original\|KODE` | Bahasa audio | `original` |
 | `--audio-format original\|mp3` | Format audio (audio saja) | `original` |
-| `--subs en,id\|none` | Bahasa subtitle | tanpa subtitle |
+| `--subs en,id\|none` | Bahasa subtitle (wajib untuk `--mode subtitle`) | tanpa subtitle |
 | `--items 1,3,5-10\|all` | Item playlist | semua |
 | `--playlist` | Link video+playlist: ambil playlist | video saja |
 
@@ -130,9 +130,9 @@ Beberapa link sekaligus: `--links-file berkas.txt` (satu link per baris; baris k
 ./youtube-downloader --links-file link.txt --yes --quality 1080
 ```
 
-Nilai yang tidak ditawarkan video itu ditolak dengan daftar pilihan; flag yang tidak berlaku untuk pilihan lain (misalnya `--quality` pada audio saja) ditolak, tidak diabaikan diam-diam. Untuk tiap bahasa di `--subs`, CC asli didahulukan dari caption otomatis dan terjemahan; bahasa yang tidak ada disebutkan. Ringkasan tetap dicetak sebelum unduhan.
+Nilai yang tidak ditawarkan video itu ditolak dengan daftar pilihan; flag yang tidak berlaku untuk pilihan lain (misalnya `--quality` pada audio saja) ditolak, tidak diabaikan diam-diam. Untuk tiap bahasa di `--subs`, CC asli didahulukan dari caption otomatis dan terjemahan; bahasa yang tidak ada disebutkan. `--mode subtitle` tanpa `--subs` (atau dengan `--subs none`, atau hanya `--yes`) ditolak karena tidak ada yang disimpan. Ringkasan tetap dicetak sebelum unduhan.
 
-Path file yang tersimpan (✓ dan ! subtitle belum lengkap) dicetak satu per baris ke stdout dalam mode `--yes`, dan juga pada wizard atau resume interaktif bila stdout ditangkap atau dialihkan; jika tidak, stdout kosong. Kode keluar: 0 selesai, 1 gagal atau ada yang belum selesai, 130 dihentikan.
+Path file yang tersimpan (✓ dan ! subtitle belum lengkap) dicetak satu per baris ke stdout dalam mode `--yes` (pada `--mode subtitle`: satu path per file `.srt`), dan juga pada wizard atau resume interaktif bila stdout ditangkap atau dialihkan; jika tidak, stdout kosong. Kode keluar: 0 selesai, 1 gagal atau ada yang belum selesai, 130 dihentikan.
 
 ## Hasil video + audio
 
@@ -160,6 +160,27 @@ Setiap track disimpan sebagai **SRT terpisah**. Untuk mode yang memiliki video, 
 
 Subtitle gagal tidak membuang media yang sudah selesai: hasil ditandai partial. Resume mengambil kembali subtitle yang hilang dan memperbarui track dalam hasil akhir, menggunakan media yang sudah ada. Nama track membedakan CC dan caption otomatis. Pada playlist dengan banyak sumber, sumber dipilih per item dan terlihat pada ringkasan.
 
+**Memilih track.** Satu video bisa punya seratus lebih terjemahan, jadi bila trackya lebih dari 15 dan ada CC atau caption bersama terjemahan, pertanyaannya dua tahap dengan satu nomor langkah dan satu baris riwayat: daftar pendek (CC asli, caption otomatis, dan satu baris *Terjemahan ke bahasa lain…* dengan jumlahnya) dan, hanya bila baris itu dicentang, daftar terjemahan. Daftar kedua boleh dibiarkan kosong bila sebuah caption sudah dicentang; selain itu Enter tanpa centang ditolak. Mengetik menyaring daftar (`indo` menyisakan Indonesian) dan tidak pernah mengubah centang; Ctrl+A dan Tab dimatikan supaya ratusan bahasa tidak tercentang tanpa sengaja. Pada playlist tiap baris menyebut berapa video yang punya track itu (`19/21 video`). Daftar yang lebih pendek tetap satu daftar. Pilihan bernomor (`--plain`) memuat informasi yang sama.
+
+**Sumber terjemahan.** Bila sebuah bahasa tersedia sebagai terjemahan dari CC pembuat dan dari caption otomatis, yang dari CC dipakai karena ditulis orang; ringkasan menyebut sumber yang diambil per video.
+
+**Jeda dan batas laju.** Subtitle diambil satu per satu dengan jeda profil `YTDL_PACE` di antaranya (tampil sebagai `Menunggu · jeda antar-subtitle`), karena video dengan banyak track yang diminta tanpa jeda cepat dijawab HTTP 429. Jeda yang diminta server (`Retry-After`) paling lama 60 detik. Setelah 429 sebuah subtitle mendapat satu percobaan ulang, bukan empat; dua subtitle berturut-turut yang ditolak 429 menghentikan sisa subtitle video itu (alasannya `dibatasi · 429`), dan dua video berturut-turut yang begitu menghentikan batch. Media yang sudah selesai tetap disimpan dan `resume` meminta subtitle yang kurang. Memilih lebih dari 10 track per video dikabari di ringkasan beserta perkiraan jumlah permintaan; itu peringatan, tidak menahan `--yes`. Path subtitle lebih panjang dari path media, jadi pada Windows panjangnya diperiksa sebelum unduhan dimulai (batas 259 karakter); pesannya menyarankan `--output` yang lebih pendek.
+
+**Yang tidak tersimpan.** Kartu hasil dan laporan menyebut subtitle yang tidak tersimpan beserta alasannya: tidak tersedia, dibatasi · 429, kosong, FFmpeg gagal, path terlalu panjang, file hilang, atau gagal. Arsip menyimpan alasan itu, dan file yang hilang dari disk dicatat sebagai `file hilang`. `status --json` memuat tiap job dengan `missing_subtitles` (item, track, nama, alasan; paling banyak 50) dan `missing_subtitles_total`.
+
+### Subtitle saja
+
+Mode keempat menyimpan **hanya** file `.srt` di folder `subtitle`: tanpa video, tanpa audio, tanpa folder sementara, dan tanpa catatan di arsip unduhan. Dipakai ketika subtitle yang ingin ditambah atau diganti, tanpa mengunduh ulang media. Pilihan subtitle ikut membentuk identitas unduhan media, jadi mengubahnya lewat mode biasa berarti media diunduh lagi.
+
+```bash
+./youtube-downloader 'LINK_PLAYLIST' --mode subtitle --subs id --items all --yes
+```
+
+- Wizard hanya bertanya subtitle (langkah 1/2) dan mulai (2/2). Flag kualitas, format, dan bahasa audio ditolak untuk mode ini; `--subs` wajib.
+- Nama file memuat judul, ID video, asal, dan kode track, misalnya `Judul [ID].automatic_captions-id.srt`, tanpa kualitas atau identitas varian media. Karena itu menjalankan pilihan yang sama lagi menemukan file yang sudah ada: item yang semua filenya ada dilewati tanpa menghubungi YouTube, dan selain itu hanya file yang belum ada yang diambil, dengan jeda dan penanganan 429 yang sama seperti di atas.
+- File ini terpisah dari `.srt` yang dibuat bersama unduhan media (namanya lain) dan tidak ditanam ke MKV yang sudah jadi. Media dari unduhan sebelumnya tidak disentuh.
+- Baris `Tahap` hanya `Metadata → Subtitle`. Ringkasan akhir menghitung file dan ukurannya; stdout mencetak satu path per file.
+
 ## Folder dan nama file
 
 Default Ubuntu: `~/Videos/YouTube`; macOS: `~/Movies/YouTube`; Windows: folder Videos pengguna yang sebenarnya (termasuk jika dipindahkan), subfolder `YouTube`. `--output "FOLDER"` mengubah lokasi job baru dan tetap dihormati.
@@ -178,7 +199,7 @@ ROOT_MEDIA/
 └── .state/             # job, arsip, log, cache, file sementara, cadangan
 ```
 
-Nama hasil memuat judul, ID YouTube, kualitas, mode, dan identitas varian. Berbeda resolusi, mode, bahasa audio, atau pilihan subtitle bisa menghasilkan file terpisah. Tidak ada folder per video/playlist. JSON/log/database tidak ikut masuk folder media.
+Nama hasil memuat judul, ID YouTube, kualitas, mode, dan identitas varian. Berbeda resolusi, mode, bahasa audio, atau pilihan subtitle bisa menghasilkan file terpisah. Pengecualiannya mode *Subtitle saja*: namanya hanya judul, ID, dan track. Tidak ada folder per video/playlist. JSON/log/database tidak ikut masuk folder media.
 
 Tujuan sekali pakai:
 
@@ -205,7 +226,7 @@ Panel diperbarui di tempat yang sama, sekitar 12 kali per detik. Worker hanya me
 - Merah (gelap `#FF5470`, terang `#D1122F`): hanya untuk kegagalan (`✗`, `Gagal`, `! GAGAL`). Bar file memakai scarlet-nya sendiri, bukan merah ini.
 - Blok `█` terisi, `░` kosong. Dengan gerak aktif, status memakai spinner braille dan cahaya yang menyapu teks; saat file selesai bar menyala sekali lalu tenang. Pemeriksaan metadata dan langkah lama lain memakai spinner yang sama, dan banner judul diketik satu kali pada awal sesi interaktif. Ukuran tidak diketahui memakai tiga blok bergerak dan tanpa persen/ETA; animasi berhenti saat menunggu/merge/gagal.
 - Status menampilkan pemeriksaan, pengunduhan, retry, menunggu dengan countdown jika durasinya diketahui, dan penggabungan. Jeda sebelum tiap file (lihat `YTDL_PACE`) tampil sebagai `Menunggu · jeda antar-unduhan · sisa 1d`, bukan sebagai unduhan 0 B/s; `--plain` mencetaknya sebagai satu baris per jeda, jadi dua baris tambahan tiap video.
-- Baris `Tahap` menunjukkan posisi item yang sedang berjalan, misalnya `✓ Metadata → ● Video → ○ Audio → ○ Gabung`: ✓ selesai, ● berjalan, ○ menunggu, ✗ tahap yang gagal. Subtitle muncul hanya jika dipilih; untuk video saja atau audio saja tahap terakhir bernama `Simpan`. Tahap yang dilewati (misalnya stream yang sudah ada saat resume) dihitung selesai. Pada terminal sempit hanya tahap yang berjalan yang diberi nama.
+- Baris `Tahap` menunjukkan posisi item yang sedang berjalan, misalnya `✓ Metadata → ● Video → ○ Audio → ○ Gabung`: ✓ selesai, ● berjalan, ○ menunggu, ✗ tahap yang gagal. Subtitle muncul hanya jika dipilih; untuk video saja atau audio saja tahap terakhir bernama `Simpan`; mode Subtitle saja hanya `Metadata → Subtitle`. Tahap yang dilewati (misalnya stream yang sudah ada saat resume) dihitung selesai. Pada terminal sempit hanya tahap yang berjalan yang diberi nama.
 - Playlist (dua item atau lebih) menampilkan jendela 6 baris di bawah bar Item, dengan satu item selesai di atas item yang berjalan: ○ menunggu, ● berjalan, ✓ tersimpan, ! tersimpan tetapi subtitle belum lengkap, ✗ gagal, – dilewati (sudah ada di arsip). Baris disembunyikan pada terminal yang terlalu pendek untuk memuatnya bersama panel.
 
 - Satu video tidak punya batch untuk dihitung, jadi panelnya lima baris: bar File, baris Tahap, nama file, kecepatan, dan `Status ... · berjalan 16d`. Bar Item, baris Hasil, dan baris Durasi hanya muncul untuk playlist. Ringkasan akhir satu video berbentuk kartu (judul; kualitas, codec, format, ukuran; nama file) tanpa hitungan 1/1.
@@ -242,7 +263,7 @@ Download publik tidak memakai cookie secara default. Jika YouTube meminta login/
 
 Profil khusus: `--browser 'firefox:/jalur/profil'`. Tools memakai pembaca cookie yt-dlp, bukan meminta password atau membuat file cookie di media. Cookie browser tidak portable untuk komputer lain.
 
-Retry jaringan dibatasi empat kali, timeout socket 30 detik. Permintaan login dan batas laju (HTTP 429) menghentikan batch seketika, karena meneruskan permintaan hanya memperburuknya. Tiga kegagalan berurutan jenis lain (format tidak tersedia, jaringan, atau sistem) juga menghentikannya; video private/dihapus dilewati tanpa dihitung. Bila yt-dlp yang terpasang dirilis lebih dari 45 hari lalu, pesan henti menyebut umurnya dan menyarankan `update --check` untuk melihat apakah ada rilis alat baru (`update` hanya memasang rilis alat ini, bukan yt-dlp terbaru). Subtitle menghormati `Retry-After` numerik dan retry dengan jeda. Batas permintaan YouTube/403 bisa tetap memerlukan menunggu dan sesi browser yang valid; jangan menganggap setiap penurunan speed sebagai Wi-Fi bermasalah.
+Retry jaringan dibatasi empat kali, timeout socket 30 detik. Permintaan login dan batas laju (HTTP 429) menghentikan batch seketika, karena meneruskan permintaan hanya memperburuknya. Tiga kegagalan berurutan jenis lain (format tidak tersedia, jaringan, atau sistem) juga menghentikannya; video private/dihapus dilewati tanpa dihitung. Bila yt-dlp yang terpasang dirilis lebih dari 45 hari lalu, pesan henti menyebut umurnya dan menyarankan `update --check` untuk melihat apakah ada rilis alat baru (`update` hanya memasang rilis alat ini, bukan yt-dlp terbaru). Subtitle diambil dengan jeda `YTDL_PACE` di antaranya, menghormati `Retry-After` numerik paling lama 60 detik, dan mendapat satu percobaan ulang setelah 429; pada subtitle, batch baru berhenti setelah dua video berturut-turut yang subtitle-nya ditolak 429 (bagian Subtitle). Batas permintaan YouTube/403 bisa tetap memerlukan menunggu dan sesi browser yang valid; jangan menganggap setiap penurunan speed sebagai Wi-Fi bermasalah.
 
 Detail ada di `.state/download.log` dan `.state/setup.log`. Setiap log dipangkas saat mulai bila melebihi 5 MiB: isi lama dipindah ke `.log.1` (hanya satu salinan lama yang disimpan), sehingga log tidak tumbuh tanpa batas. Log/checkpoint dapat berisi URL bertanda tangan atau informasi sesi; jangan membagikannya mentah. Tools tidak menghapus hasil sukses ketika ada kegagalan.
 
