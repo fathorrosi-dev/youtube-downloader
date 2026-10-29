@@ -1221,6 +1221,24 @@ def timings_table(ui, job):
     )
 
 
+# The most subtitles that `status --json` lists for one job. A playlist of 21 videos that lost a
+# hundred and fifty each would otherwise put three thousand lines into the output.
+MAX_LISTED_SUBTITLES = 50
+
+
+def missing_subtitles(job):
+    """The subtitles that the items of a job did not save: item, track, name and the reason (a
+    code, see model.MISSING_REASONS; absent in a record from before it was kept)."""
+    lost = []
+    for item in job.get("items") or []:
+        for track in (item.get("result") or {}).get("missing") or []:
+            entry = {"item": item.get("id"), "key": track.get("key"), "name": track.get("name")}
+            if track.get("reason"):
+                entry["reason"] = track["reason"]
+            lost.append(entry)
+    return lost
+
+
 def status(ui, as_json=False, timings=False):
     """The state of this installation as a table on stderr, or with --json as one JSON object on
     stdout (the table is not drawn) for a script to read. With `timings`, the items' times."""
@@ -1312,6 +1330,10 @@ def status(ui, as_json=False, timings=False):
         where = job_timings(j, detail=timings)
         if where:
             entry["timings"] = where
+        lost = missing_subtitles(j)
+        if lost:
+            entry["missing_subtitles"] = lost[:MAX_LISTED_SUBTITLES]
+            entry["missing_subtitles_total"] = len(lost)
         data["jobs"].append(entry)
     data["unreadable_jobs"] = [{"file": name, "reason": reason} for name, reason in unreadable]
     if as_json:

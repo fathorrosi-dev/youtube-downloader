@@ -454,7 +454,7 @@ def adopt_result(item, root, target, mode, events):
         if path.is_file() and path.stat().st_size:
             saved.append({**track, "path": str(path)})
         else:
-            missing.append(track)
+            missing.append({**track, "reason": "gone"})
     return {"path": str(target), "mode": mode, "subtitles": saved, "missing": missing}
 
 

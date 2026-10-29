@@ -407,6 +407,7 @@ MISSING_REASONS = {
     "empty": "kosong",
     "ffmpeg": "FFmpeg gagal",
     "path": "path terlalu panjang",
+    "gone": "file hilang",
     "failed": "gagal",
 }
 

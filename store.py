@@ -220,9 +220,12 @@ class Archive:
             track for track in result.get("subtitles", []) if not Path(track["path"]).is_file()
         ]
         if missing:
-            result["missing"] = list(
-                {x["key"]: x for x in result.get("missing", []) + missing}.values()
-            )
+            # What the record already says about a missing track (and why) is kept; a track that
+            # was saved and whose file is not there now is new, and "gone" is the reason.
+            known = {x["key"]: x for x in result.get("missing", [])}
+            for track in missing:
+                known.setdefault(track["key"], {**track, "reason": "gone"})
+            result["missing"] = list(known.values())
         return result, seen
 
     def _remember(self, rowid, payload, seen):

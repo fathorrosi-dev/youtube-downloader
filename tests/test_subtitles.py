@@ -1,11 +1,15 @@
 """The subtitle choice with the captions a real video has (a hundred and fifty translations a
 track), not the one or two the other tests give it."""
 
+import io
 import json
 import re
 import sys
+import tempfile
 import time
 import unittest
+import unittest.mock
+from contextlib import redirect_stderr
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[1]
@@ -14,8 +18,10 @@ import testenv  # noqa: F401
 import app
 import model
 import captions
+import store
+import ui
 from terminal import Terminal
-from test_tools import synthetic
+from test_tools import rich_ui, synthetic
 
 
 class Shape(unittest.TestCase):
@@ -189,6 +195,116 @@ class Source(unittest.TestCase):
         merged = app.merge_tracks(metadata)
         identities, _ = app.subtitle_identities(merged, ["id"])
         return app.build_items(None, metadata, merged, answers(identities))
+
+
+LOST = [
+    {"key": "id", "name": "Indonesian", "reason": "limited"},
+    {"key": "en", "name": "English", "reason": "unavailable"},
+]
+
+
+class Incomplete(unittest.TestCase):
+    """What the card and the report say about subtitles that were not saved."""
+
+    def test_the_note_names_each_track_with_its_reason(self):
+        self.assertEqual(
+            ui.missing_note(LOST), "Indonesian (dibatasi · 429), English (tidak tersedia)"
+        )
+
+    def test_a_long_list_is_cut_with_how_many_are_left(self):
+        many = [{"key": f"k{n}", "name": f"L{n}", "reason": "failed"} for n in range(6)]
+        self.assertEqual(ui.missing_note(many), "L0 (gagal), L1 (gagal), L2 (gagal) +3 lagi")
+
+    def test_a_record_from_before_the_reasons_gives_the_names_alone(self):
+        self.assertEqual(ui.missing_note([{"key": "id", "name": "Indonesian"}]), "Indonesian")
+        self.assertEqual(ui.missing_note([{"key": "id"}]), "id")
+        self.assertEqual(ui.incomplete({}), "subtitle belum lengkap")
+
+    def test_a_reason_that_is_not_known_is_left_out_not_shown_raw(self):
+        self.assertEqual(ui.missing_note([{"key": "id", "name": "X", "reason": "???"}]), "X")
+
+    def job(self, folder, missing):
+        root = Path(folder) / "out"
+        (root / "video").mkdir(parents=True)
+        (root / "video/b.mp4").write_bytes(b"x" * 10)
+        return {
+            "id": "abc123",
+            "status": "partial",
+            "output": str(root),
+            "items": [
+                {
+                    "id": "b",
+                    "title": "B",
+                    "status": "partial",
+                    "result": {"path": str(root / "video/b.mp4"), "missing": missing},
+                    "choice": {
+                        "mode": "video-audio",
+                        "actual_quality": 1080,
+                        "vcodec": "avc1",
+                        "acodec": "mp4a",
+                    },
+                }
+            ],
+        }
+
+    def test_the_plain_report_says_what_is_missing_and_why(self):
+        with tempfile.TemporaryDirectory() as folder:
+            job = self.job(folder, LOST)
+            screen = ui.UI(True)
+            with redirect_stderr(io.StringIO()) as captured:
+                screen.report(job, Path(folder) / "download.log")
+            self.assertIn(
+                "[!] video/b.mp4 (10 B · subtitle belum lengkap: "
+                "Indonesian (dibatasi · 429), English (tidak tersedia))",
+                captured.getvalue().splitlines(),
+            )
+
+    def test_the_card_says_what_is_missing_and_why_at_a_narrow_width(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for width in (40, 80):
+                screen, buffer = rich_ui(width)
+                screen.report(self.job(folder + str(width), LOST), Path(folder) / "download.log")
+                text = " ".join(buffer.getvalue().split())
+                self.assertIn("subtitle belum lengkap: Indonesian (dibatasi · 429)", text)
+                self.assertTrue(all(len(x) <= width for x in buffer.getvalue().splitlines()))
+
+    def test_the_archive_keeps_the_reason_and_marks_a_file_that_went_missing_as_gone(self):
+        with tempfile.TemporaryDirectory() as folder:
+            media = Path(folder) / "a.m4a"
+            media.write_bytes(b"x")
+            kept = {"key": "id", "name": "Indonesian", "reason": "limited"}
+            saved = {"key": "en", "name": "English", "path": str(Path(folder) / "a.en.srt")}
+            result = {"path": str(media), "mode": "audio", "subtitles": [saved], "missing": [kept]}
+            with (
+                unittest.mock.patch.object(store, "probe"),
+                unittest.mock.patch.object(store, "STATE", Path(folder) / "state"),
+            ):
+                archive = store.Archive()
+                self.addCleanup(archive.close)
+                archive.put("v", result)
+                found = archive.get("v", "audio")
+        reasons = {x["key"]: x.get("reason") for x in found["missing"]}
+        self.assertEqual(reasons, {"id": "limited", "en": "gone"})
+
+    def test_status_lists_the_missing_subtitles_of_a_job_with_their_reasons(self):
+        job = {
+            "items": [
+                {"id": "a", "result": {"missing": LOST}},
+                {"id": "b", "result": {"missing": [{"key": "ja", "name": "Japanese"}]}},
+                {"id": "c", "result": {"missing": []}},
+                {"id": "d"},
+            ]
+        }
+        lost = app.missing_subtitles(job)
+        self.assertEqual(
+            lost,
+            [
+                {"item": "a", "key": "id", "name": "Indonesian", "reason": "limited"},
+                {"item": "a", "key": "en", "name": "English", "reason": "unavailable"},
+                {"item": "b", "key": "ja", "name": "Japanese"},
+            ],
+        )
+        self.assertEqual(app.missing_subtitles({}), [])
 
 
 ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[=>])")

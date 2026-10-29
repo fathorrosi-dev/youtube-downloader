@@ -19,7 +19,7 @@ import questionary
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.output import ColorDepth
 from compat import configure_terminal, stdout_is_console, windows_build
-from model import codec_name
+from model import MISSING_REASONS, codec_name
 
 # Three colours carry the look: pink for what you chose and for success, sky blue for what is
 # going on (labels, the item bar, hints), red only for what failed. Grey is for secondary text and
@@ -433,6 +433,27 @@ EMPTY_CHOICE = (
 )
 
 
+def missing_note(missing, limit=3):
+    """The subtitles that were not saved and why, for the card and the report: "Indonesian
+    (dibatasi · 429), English (tidak tersedia) +2 lagi". A record from before the reasons were kept
+    gives the names alone."""
+    parts = []
+    for track in missing[:limit]:
+        name = str(track.get("name") or track.get("key") or "?")
+        reason = MISSING_REASONS.get(track.get("reason"))
+        parts.append(f"{name} ({reason})" if reason else name)
+    text = ", ".join(parts)
+    if len(missing) > limit:
+        text += f" +{len(missing) - limit} lagi"
+    return text
+
+
+def incomplete(result):
+    """ "subtitle belum lengkap: ..." with the tracks that are missing from a result, if it says."""
+    note = missing_note(result.get("missing") or [])
+    return "subtitle belum lengkap" + (": " + note if note else "")
+
+
 def without_bulk_keys(question):
     """Make Ctrl+A (tick every row) and Tab (invert) do nothing in a questionary checkbox.
 
@@ -646,7 +667,7 @@ class UI:
         parts += [path.suffix[1:].upper(), weight]
         title = Text(str(item.get("title") or item.get("id") or shown), style="bold")
         if item["status"] == "partial":
-            title.append(" · subtitle belum lengkap", style=DIM)
+            title.append(" · " + incomplete(result), style=DIM)
         grid = Table.grid(padding=(0, 1))
         grid.add_column(width=1, no_wrap=True)
         grid.add_column(overflow="fold")
@@ -677,7 +698,7 @@ class UI:
                 except OSError:
                     detail = "file tidak ditemukan"
                 if status == "partial":
-                    detail += " · subtitle belum lengkap"
+                    detail += " · " + incomplete(item["result"])
                 rows.append(("warn" if status == "partial" else "ok", shown, detail))
             elif status == "failed":
                 reason = (item.get("error") or {}).get("message") or "gagal"
