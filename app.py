@@ -65,7 +65,7 @@ from store import (
 )
 from runner import run, WorkerError, cancelled_by
 from rich.text import Text
-from ui import UI, Session, Cancelled, BLUE, DIM, RED, clock, size, tidy
+from ui import UI, Session, Cancelled, BLUE, DIM, RED, clock, picked_summary, size, tidy
 
 # Words that are commands, not links.
 COMMANDS = ("status", "preview", "resume", "update", "clean", "rebase-media")
@@ -441,17 +441,30 @@ def describe_single(ui, metadata):
     ui.say(Text(" · ".join(details), style=DIM))
 
 
+def track_identity(track, playlist):
+    """What makes two tracks the same row of the menu. A playlist lists a language once, whatever
+    the source each video has it from; one video keeps its sources apart."""
+    if playlist:
+        return (track["language"], track["kind"])
+    return (track["language"], track["kind"], track["key"], track["origin"])
+
+
 def merge_tracks(metadata):
     all_tracks = {}
     for m in metadata:
         for t in tracks(m):
-            identity = (
-                (t["language"], t["kind"])
-                if len(metadata) > 1
-                else (t["language"], t["kind"], t["key"], t["origin"])
-            )
-            all_tracks.setdefault(identity, t)
+            all_tracks.setdefault(track_identity(t, len(metadata) > 1), t)
     return all_tracks
+
+
+def track_coverage(metadata):
+    """{identity of merge_tracks(): how many of the videos have it}."""
+    playlist = len(metadata) > 1
+    found = {}
+    for m in metadata:
+        for identity in {track_identity(t, playlist) for t in tracks(m)}:
+            found[identity] = found.get(identity, 0) + 1
+    return found
 
 
 def subtitle_identities(all_tracks, wanted):
@@ -472,6 +485,10 @@ def subtitle_identities(all_tracks, wanted):
     return chosen, missing
 
 
+# A list of more tracks than this, with captions and translations both in it, is asked in two
+# steps. MORE_LANGUAGES is the row of the short list that stands for the translations.
+SPLIT_LIST = 15
+MORE_LANGUAGES = "translations"
 TRACK_KINDS = {
     "manual": "CC asli",
     "automatic": "Caption otomatis",
@@ -543,25 +560,61 @@ def ask_subtitles(ui, preset, mode, compatible, metadata, all_tracks, step, prev
                 style=DIM,
             )
         )
-    options = [
-        (
-            f"{t['name']} · {TRACK_KINDS[t['kind']]}"
-            + (
-                " · sumber dipilih per video"
-                if len(metadata) > 1 and t["kind"] == "translated"
-                else ""
-            ),
-            identity,
-        )
-        for identity, t in all_tracks.items()
-    ]
-    extra = {"checked": previous["chosen"]} if previous and previous.get("chosen") else {}
+    total = len(metadata)
+    cover = track_coverage(metadata) if total > 1 else {}
+
+    def row(identity):
+        t = all_tracks[identity]
+        text = f"{t['name']} · {TRACK_KINDS[t['kind']]}"
+        if total > 1:
+            text += f" · {cover.get(identity, 0)}/{total} video"
+        return text, identity
+
+    before = previous["chosen"] if previous and previous.get("chosen") else []
+    extra = {"checked": before} if before else {}
+    originals = [i for i, t in all_tracks.items() if t["kind"] != "translated"]
+    translated = [i for i, t in all_tracks.items() if t["kind"] == "translated"]
     # Enter with nothing ticked is refused: this person said yes to subtitles a moment ago, so an
     # empty list is a missed Space. Ctrl+A is off because ticking all of a hundred and fifty
     # languages is never what was meant.
-    return ui.checkboxes(
-        "Track subtitle", options, step=step, required=True, bulk=False, **extra
-    ), True
+    if len(all_tracks) <= SPLIT_LIST or not originals or not translated:
+        return ui.checkboxes(
+            "Track subtitle",
+            [row(i) for i in all_tracks],
+            step=step,
+            required=True,
+            bulk=False,
+            **extra,
+        ), True
+    # A video has the translations of its captions into every language: a hundred and fifty rows
+    # under the two or three that are the captions themselves. Those come first, with one row that
+    # opens the translations when they are wanted.
+    short = [row(i) for i in originals]
+    short.append((f"Terjemahan ke bahasa lain… · {len(translated)} bahasa", MORE_LANGUAGES))
+    shown = set(translated)
+    picked = ui.checkboxes(
+        "Track subtitle",
+        short,
+        step=step,
+        required=True,
+        bulk=False,
+        record=False,
+        checked=[i for i in before if i not in shown]
+        + ([MORE_LANGUAGES] if any(i in shown for i in before) else []),
+    )
+    chosen = [i for i in picked if i != MORE_LANGUAGES]
+    if MORE_LANGUAGES in picked:
+        chosen += ui.checkboxes(
+            "Terjemahan subtitle",
+            [row(i) for i in translated],
+            step=step,
+            required=not chosen,
+            bulk=False,
+            record=False,
+            checked=[i for i in before if i in shown],
+        )
+    ui.answered("Track subtitle", picked_summary([row(i)[0] for i in chosen]), step)
+    return chosen, True
 
 
 def ask_settings(ui, metadata, all_tracks, preset, previous=None):

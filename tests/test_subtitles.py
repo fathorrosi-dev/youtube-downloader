@@ -372,7 +372,7 @@ def menu(required=True, bulk=False):
 
 
 def result(output):
-    found = re.findall(r"RESULT (\[.*?\])", output)
+    found = re.findall(r"RESULT (\[.*\])", output)
     return json.loads(found[-1]) if found else None
 
 
@@ -432,6 +432,153 @@ class Menu(unittest.TestCase):
     def test_a_list_that_does_not_require_an_answer_accepts_none_ticked(self):
         out = ask(menu(required=False), [("shows", "Track subtitle"), ENTER])
         self.assertEqual(result(out), [])
+
+
+def subtitle_menu(videos, previous=None, translations=None):
+    """A script that asks the whole subtitle question of the wizard (the yes/no, then the lists)
+    for `videos` captions and prints the identities that came back."""
+    extra = "" if translations is None else f", translations={translations!r}"
+    return (
+        "import json, sys\n"
+        "sys.path.insert(0, 'tests')\n"
+        "import captions, app\n"
+        "from ui import UI\n"
+        f"metadata = captions.playlist({videos}{extra}) if {videos} > 1 else "
+        f"[captions.video('one00000001'{extra})]\n"
+        "merged = app.merge_tracks(metadata)\n"
+        "chosen, _ = app.ask_subtitles(UI(), {'_used': set()}, 'video-audio', False, metadata, "
+        f"merged, (4, 5), {previous!r})\n"
+        "print('RESULT', json.dumps([list(i) for i in chosen]))\n"
+    )
+
+
+def originals_of(videos):
+    merged = app.merge_tracks(captions.playlist(videos) if videos > 1 else [captions.video("a")])
+    return [i for i, t in merged.items() if t["kind"] != "translated"]
+
+
+class Coverage(unittest.TestCase):
+    def test_a_playlist_counts_the_videos_that_have_each_track(self):
+        without = [(c, n) for c, n in captions.TRANSLATIONS if c != "id"]
+        metadata = [
+            captions.video("vid00000001"),
+            captions.video("vid00000002", translations=without),
+            captions.video("vid00000003"),
+        ]
+        found = app.track_coverage(metadata)
+        self.assertEqual(found[("id", "translated")], 2)
+        self.assertEqual(found[("ja", "translated")], 3)
+        manual = [i for i, t in app.merge_tracks(metadata).items() if t["kind"] == "manual"]
+        self.assertEqual([found[i] for i in manual], [3])
+        self.assertEqual(set(found), set(app.merge_tracks(metadata)))
+
+
+class Picker(unittest.TestCase):
+    """The question about subtitles as the wizard asks it, on a pseudo-terminal."""
+
+    def test_captions_are_listed_first_with_one_row_for_the_translations(self):
+        out = ask(
+            subtitle_menu(3),
+            [DOWN, ENTER, ("shows", "Terjemahan ke bahasa lain"), CTRL_C],
+            timeout=30,
+        )
+        shown = out.split("Terjemahan ke bahasa lain")[0]
+        self.assertIn("4/5  Track subtitle", shown)
+        self.assertIn("CC asli · 3/3 video", shown)
+        self.assertIn("Caption otomatis · 3/3 video", shown)
+        self.assertNotIn("Indonesian", shown)
+        self.assertIn(f"{len(captions.TRANSLATIONS)} bahasa", out)
+
+    def test_the_language_is_found_in_the_second_list_by_typing(self):
+        out = ask(
+            subtitle_menu(3),
+            [DOWN, ENTER, ("shows", "Terjemahan ke bahasa lain")]
+            + list("terjemahan")
+            + [SPACE, ENTER, ("shows", "Terjemahan subtitle")]
+            + list("indonesia")
+            + [SPACE, ENTER],
+        )
+        self.assertEqual(result(out), [["id", "translated"]])
+        self.assertIn("4/5  Terjemahan subtitle", out)
+        # One history line for the whole question, not one for each of the two lists.
+        self.assertEqual(len(re.findall(r"4/5\s+Track subtitle\s+Indonesian", out)), 1)
+
+    def test_the_translations_are_not_asked_for_unless_the_row_is_ticked(self):
+        n = len(originals_of(3))
+        out = ask(subtitle_menu(3), [DOWN, ENTER, ("shows", "Track subtitle"), SPACE, ENTER])
+        self.assertEqual(len(result(out)), 1)
+        self.assertGreaterEqual(n, 1)
+        self.assertNotIn("Terjemahan subtitle", out)
+
+    def test_a_caption_and_a_translation_can_be_taken_together(self):
+        n = len(originals_of(3))
+        out = ask(
+            subtitle_menu(3),
+            [DOWN, ENTER, ("shows", "Track subtitle"), SPACE]
+            + [DOWN] * n
+            + [SPACE, ENTER, ("shows", "Terjemahan subtitle")]
+            + list("indonesia")
+            + [SPACE, ENTER],
+        )
+        found = result(out)
+        self.assertEqual(len(found), 2)
+        self.assertEqual(found[-1], ["id", "translated"])
+
+    def test_the_translations_row_alone_with_nothing_ticked_in_it_is_refused(self):
+        n = len(originals_of(3))
+        out = ask(
+            subtitle_menu(3),
+            [DOWN, ENTER, ("shows", "Track subtitle")]
+            + [DOWN] * n
+            + [SPACE, ENTER, ("shows", "Terjemahan subtitle"), ENTER]
+            + [("shows", "Belum ada yang dicentang"), CTRL_C],
+        )
+        self.assertIsNone(result(out))
+
+    def test_the_translations_list_may_stay_empty_when_a_caption_was_ticked(self):
+        n = len(originals_of(3))
+        out = ask(
+            subtitle_menu(3),
+            [DOWN, ENTER, ("shows", "Track subtitle"), SPACE]
+            + [DOWN] * n
+            + [SPACE, ENTER, ("shows", "Terjemahan subtitle"), ENTER],
+        )
+        self.assertEqual(len(result(out)), 1)
+
+    def test_nothing_ticked_in_the_first_list_is_refused(self):
+        out = ask(
+            subtitle_menu(3),
+            [DOWN, ENTER, ("shows", "Track subtitle"), ENTER, ("shows", "Belum ada"), CTRL_C],
+        )
+        self.assertIsNone(result(out))
+
+    def test_one_video_says_no_coverage_because_there_is_nothing_to_count(self):
+        out = ask(subtitle_menu(1), [DOWN, ENTER, ("shows", "Terjemahan ke bahasa lain"), CTRL_C])
+        self.assertNotIn(" video", out.split("Terjemahan ke bahasa lain")[0])
+
+    def test_a_short_list_stays_one_list(self):
+        few = captions.TRANSLATIONS[:5]
+        out = ask(
+            subtitle_menu(1, translations=few),
+            [DOWN, ENTER, ("shows", "Track subtitle"), SPACE, ENTER],
+        )
+        self.assertNotIn("Terjemahan ke bahasa lain", out)
+        self.assertNotIn("Terjemahan subtitle", out)
+        self.assertEqual(len(result(out)), 1)
+
+    def test_changing_the_settings_starts_from_the_earlier_answer(self):
+        previous = {"addon": True, "chosen": [("id", "translated")]}
+        out = ask(
+            subtitle_menu(3, previous=previous),
+            [
+                ENTER,
+                ("shows", "Terjemahan ke bahasa lain"),
+                ENTER,
+                ("shows", "Terjemahan subtitle"),
+                ENTER,
+            ],
+        )
+        self.assertEqual(result(out), [["id", "translated"]])
 
 
 if __name__ == "__main__":

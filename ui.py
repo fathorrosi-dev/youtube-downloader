@@ -454,6 +454,13 @@ def incomplete(result):
     return "subtitle belum lengkap" + (": " + note if note else "")
 
 
+def picked_summary(names):
+    """What the history line says of a checkbox answer: the names, or how many when there are many."""
+    if not names:
+        return "tidak ada"
+    return ", ".join(names) if len(names) <= 3 else f"{len(names)} dipilih"
+
+
 def without_bulk_keys(question):
     """Make Ctrl+A (tick every row) and Tab (invert) do nothing in a questionary checkbox.
 
@@ -839,7 +846,9 @@ class UI:
         self._answered(label or title, result, step)
         return result
 
-    def checkboxes(self, title, options, checked=(), step=None, required=False, bulk=True):
+    def checkboxes(
+        self, title, options, checked=(), step=None, required=False, bulk=True, record=True
+    ):
         """Pick any number of `options` (pairs of text and value); the values picked, in list order.
 
         Typing filters the list and never changes what is ticked: Space ticks the highlighted
@@ -847,7 +856,8 @@ class UI:
         that was asked for is a missed Space and not a choice; the numbered form still takes
         `none`. `bulk` keeps Ctrl+A (every row) and Tab (invert) for a list where that is a
         sensible thing to do; for a list of 150 languages it is a way to ask for all of them by
-        accident."""
+        accident. `record=False` leaves the history line to the caller, for a choice that
+        is asked in more than one list."""
         if self.numbered:
             self.say(self._message(title, step), BLUE)
             kept = [value for _, value in options if value in checked]
@@ -891,9 +901,8 @@ class UI:
         if not bulk:
             without_bulk_keys(question)
         picked = self._ask(question)
-        names = [options[i][0] for i in picked]
-        summary = "tidak ada" if not names else ", ".join(names) if len(names) <= 3 else None
-        self._answered(title, summary or f"{len(names)} dipilih", step)
+        if record:
+            self._answered(title, picked_summary([options[i][0] for i in picked]), step)
         return [options[i][1] for i in picked]
 
 
