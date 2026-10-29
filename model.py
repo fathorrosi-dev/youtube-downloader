@@ -399,6 +399,18 @@ def release_age_days(version, today=None):
     return max(0, ((today or date.today()) - released).days)
 
 
+# Why a subtitle was not saved (worker.failure_reason), in words for the person. Only the kind of
+# failure is kept, never the message of the error, which can carry a signed link.
+MISSING_REASONS = {
+    "unavailable": "tidak tersedia",
+    "limited": "dibatasi · 429",
+    "empty": "kosong",
+    "ffmpeg": "FFmpeg gagal",
+    "path": "path terlalu panjang",
+    "failed": "gagal",
+}
+
+
 # What a download records about where its time went (worker.Timings). The phases that ran, the
 # total of the worker, the seconds of that spent waiting on purpose, the media bytes it fetched,
 # their average speed when it is known, and (added by the app) the wall time around the worker.

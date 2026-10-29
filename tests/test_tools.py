@@ -666,10 +666,13 @@ class Integration(unittest.TestCase):
             model.clean_timings(timings).keys() - {"speed"}, timings.keys() - {"speed"}
         )
         self.assertGreater(timings["bytes"], 0)
-        # One pause of 0.2 s before each of the two streams, announced before the stream starts.
-        pauses = [i for i, e in enumerate(events) if e["type"] == "wait"]
-        self.assertEqual(len(pauses), 2)
-        self.assertAlmostEqual(timings["waited"], 0.4, delta=0.05)
+        # One pause of 0.2 s before each of the two streams, announced before the stream starts,
+        # and one between the two subtitle tracks (none before the first).
+        waits = [i for i, e in enumerate(events) if e["type"] == "wait"]
+        pauses = [i for i in waits if "antar-unduhan" in events[i]["message"]]
+        between_subtitles = [i for i in waits if "antar-subtitle" in events[i]["message"]]
+        self.assertEqual((len(pauses), len(between_subtitles)), (2, 1))
+        self.assertAlmostEqual(timings["waited"], 0.6, delta=0.05)
         for index in pauses:
             self.assertIn("jeda antar-unduhan", events[index]["message"])
             self.assertEqual(events[index - 1]["type"], "stage")

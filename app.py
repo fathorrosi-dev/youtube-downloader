@@ -700,6 +700,11 @@ def ask_settings(ui, metadata, all_tracks, preset, previous=None):
     }
 
 
+# More requested subtitle tracks than this per video is said in the summary, with what it costs:
+# each one is a request of its own, with a pause before it.
+MANY_SUBTITLES = 10
+
+
 def build_items(ui, metadata, all_tracks, settings_):
     """The job items for the answers given, and the summary rows that describe them."""
     mode = settings_["mode"]
@@ -818,7 +823,13 @@ def build_items(ui, metadata, all_tracks, settings_):
         if absent:
             details += " · tidak ada di video ini: " + ", ".join(t["name"] for t in absent)
         rows.append((m["title"], actual, details))
-    return items, rows, not_mp4, subtitle_notes(found, lacking, all_tracks, len(items))
+    notes = subtitle_notes(found, lacking, all_tracks, len(items))
+    if len(chosen) > MANY_SUBTITLES:
+        notes.append(
+            f"! {len(chosen)} track subtitle per video, sekitar {len(chosen) * len(items)} "
+            "permintaan berurutan dengan jeda · pilih lebih sedikit bila tidak semuanya perlu"
+        )
+    return items, rows, not_mp4, notes
 
 
 def subtitle_notes(found, lacking, all_tracks, total):
@@ -853,7 +864,8 @@ def show_summary(ui, rows, root, not_mp4, notes=()):
         ui.table(("Video", "Kualitas", "Berkas"), rows)
         ui.say(Text.assemble(("Simpan di ", DIM), tidy(root)))
     for note in notes:
-        ui.say(Text(note, style=DIM))
+        # A warning is blue, like the other hints that ask for a look; the rest is secondary.
+        ui.say(Text(note, style=BLUE if note.startswith("!") else DIM))
     if not_mp4:
         ui.say(
             Text(
@@ -924,6 +936,15 @@ def wizard(ui, url, browser=None, output=None, preset=None):
 # skipped item is not needed from the file: execute asks the archive about every item again.
 SKIP_CHECKPOINT_ITEMS = 50
 SKIP_CHECKPOINT_SECONDS = 5.0
+# A batch stops when this many videos in a row had their subtitles refused with HTTP 429: the
+# server has answered the same way for a long while, and asking for the rest of the playlist
+# only makes the limit last. The videos stay "partial" and resume asks for the subtitles again.
+LIMITED_ITEMS_STOP = 2
+
+
+def subtitles_limited(result):
+    """True when a result lost a subtitle to HTTP 429."""
+    return any(m.get("reason") == "limited" for m in (result or {}).get("missing", []))
 
 
 def execute(ui, job):
@@ -937,6 +958,7 @@ def execute(ui, job):
         )
     archive = Archive()
     consecutive = 0
+    limited = 0
     job["status"] = "running"
     save_job(job)
     unsaved, saved_at = 0, time.monotonic()
@@ -1010,6 +1032,15 @@ def execute(ui, job):
                             item.pop("timings", None)
                         session.item_end(item["status"], timings)
                         consecutive = 0
+                        limited = limited + 1 if subtitles_limited(result) else 0
+                        if limited >= LIMITED_ITEMS_STOP:
+                            checkpoint()
+                            job["status"] = "blocked"
+                            raise Stopped(
+                                "Batch dihentikan. " + stop_message("rate_limit"),
+                                job["id"],
+                                category="rate_limit",
+                            )
                     except WorkerError as exc:
                         item["status"] = "failed"
                         item["error"] = {"message": str(exc), "category": exc.category}

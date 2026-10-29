@@ -9,13 +9,13 @@ import shutil
 import subprocess
 import sys
 import time
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stdout, suppress
 from compat import deno_path, worker_start
 from pathlib import Path
 import yt_dlp
 from yt_dlp.networking import Request
 from yt_dlp.utils import ISO639Utils
-from model import container, basename, variant, classify, pace_of
+from model import container, basename, variant, classify, pace_of, pace_profile
 from store import BASE, probe
 
 
@@ -277,10 +277,47 @@ def subtitle_path(root, prefix, track):
     return root / "subtitle" / f"{prefix}.{suffix}.srt"
 
 
-def subtitle_files(info, item, root, events, opts):
+# The longest the worker sleeps because a server asked it to. A Retry-After of an hour would
+# otherwise hold one subtitle of a playlist for an hour, once per attempt.
+MAX_RETRY_AFTER = 60
+# A server that has answered "too many requests" for this many subtitles in a row has said
+# enough: the rest of the subtitles of this video are left, with that as the reason, instead of
+# asking it a hundred more times. A later run (resume) asks again.
+LIMITED_STOP = 2
+
+
+def rate_limited(exc):
+    """True when a request was refused with HTTP 429 (too many requests)."""
+    status = getattr(getattr(exc, "response", None), "status", None) or getattr(exc, "status", None)
+    return status == 429 or classify(exc) == "rate_limit"
+
+
+def failure_reason(exc):
+    """Why a subtitle was not saved, as a short code (model.MISSING_REASONS says it in words).
+    Only the kind of failure is kept, never the message, which can carry a signed link."""
+    if rate_limited(exc):
+        return "limited"
+    text = str(exc)
+    if text.startswith("FFmpeg gagal"):
+        return "ffmpeg"
+    if text.startswith("Subtitle kosong"):
+        return "empty"
+    return "failed"
+
+
+def subtitle_files(info, item, root, events, opts, pace=None, sleep=time.sleep):
+    """Save the subtitles of `item` as .srt files. Returns (saved, missing): the tracks saved,
+    with their path, and the tracks that were not, each with the `reason` it was not.
+
+    The tracks are fetched one after the other with the pause of the pace profile between them,
+    as media files are: a video can have a hundred of them, and a server that is asked that
+    often without a pause answers 429."""
+    pace = pace or pace_profile()
     saved = []
     missing = []
     prefix = basename(item)
+    fetched = 0
+    limited = 0
     with yt_dlp.YoutubeDL(opts) as ydl:
         for track in item.get("subtitles", []):
             target = subtitle_path(root, prefix, track)
@@ -288,6 +325,12 @@ def subtitle_files(info, item, root, events, opts):
             if target.is_file() and target.stat().st_size:
                 saved.append({**track, "path": str(target)})
                 continue
+            if limited >= LIMITED_STOP:
+                missing.append({**track, "reason": "limited"})
+                continue
+            if fetched:
+                pause_before_download(events, pace, sleep, message="Menunggu · jeda antar-subtitle")
+            fetched += 1
             events.send("stage", message="Mengambil subtitle · " + track["name"], phase="subtitle")
             fs = info.get(track["origin"], {}).get(track["key"], [])
             formats = sorted(
@@ -295,7 +338,7 @@ def subtitle_files(info, item, root, events, opts):
                 key=lambda f: ("vtt", "srt", "ttml").index(f["ext"]),
             )
             if not formats:
-                missing.append(track)
+                missing.append({**track, "reason": "unavailable"})
                 events.send("notice", message="Subtitle tidak tersedia · " + track["name"])
                 continue
             f = formats[0]
@@ -316,15 +359,23 @@ def subtitle_files(info, item, root, events, opts):
                         break
                     except Exception as exc:
                         error = exc
-                        if attempt == 4:
+                        reply = getattr(exc, "response", None)
+                        headers = getattr(reply, "headers", {}) or {}
+                        if reply is not None:
+                            # An error answer holds its connection until it is closed; a video
+                            # with a hundred refused subtitles would hold a hundred.
+                            with suppress(Exception):
+                                reply.close()
+                        # A server that says "too many requests" gets one more try after the
+                        # pause it asked for, not four: asking on only makes the limit last.
+                        if attempt == (1 if rate_limited(exc) else 4):
                             break
                         seconds = min(30, 2**attempt)
-                        headers = getattr(getattr(exc, "response", None), "headers", {}) or {}
                         value = headers.get("Retry-After")
                         if value and str(value).isdigit():
-                            seconds = float(value)
+                            seconds = min(float(value), MAX_RETRY_AFTER)
                         wait(events, seconds, "Menunggu retry subtitle")
-                        time.sleep(seconds)
+                        sleep(seconds)
                 if error:
                     raise error
                 ffmpeg(
@@ -337,12 +388,21 @@ def subtitle_files(info, item, root, events, opts):
                     raise ValueError("Subtitle kosong")
                 temp.replace(target)
                 saved.append({**track, "path": str(target)})
+                limited = 0
             except Exception as exc:
                 print("Subtitle gagal:", exc, file=sys.stderr, flush=True)
-                missing.append(track)
+                reason = failure_reason(exc)
+                missing.append({**track, "reason": reason})
+                limited = limited + 1 if reason == "limited" else 0
                 events.send(
                     "notice", message="Subtitle gagal · " + track["name"] + "; media tetap disimpan"
                 )
+                if limited >= LIMITED_STOP:
+                    events.send(
+                        "notice",
+                        message="YouTube membatasi permintaan (429) · sisa subtitle video ini "
+                        "dilewati; lanjutkan nanti dengan resume",
+                    )
             finally:
                 raw.unlink(missing_ok=True)
                 temp.unlink(missing_ok=True)
@@ -401,7 +461,9 @@ def stream_present(folder, stream):
     )
 
 
-def pause_before_download(events, pace, sleep=time.sleep, uniform=random.uniform):
+def pause_before_download(
+    events, pace, sleep=time.sleep, uniform=random.uniform, message="Menunggu · jeda antar-unduhan"
+):
     """The pause before a file that yt-dlp used to make without saying anything (sleep_interval):
     a random time within the profile's range, shown in the panel as "Menunggu" with the time
     left. Returns the seconds waited."""
@@ -409,7 +471,7 @@ def pause_before_download(events, pace, sleep=time.sleep, uniform=random.uniform
     seconds = uniform(low, high)
     if seconds < 0.05:
         return 0.0
-    wait(events, seconds, "Menunggu · jeda antar-unduhan")
+    wait(events, seconds, message)
     sleep(seconds)
     return seconds
 
@@ -525,7 +587,7 @@ def download(request, events):
             paths[stream] = filepath
             paths[format_id] = filepath
     with timings.phase("subtitle"):
-        subtitles, missing = subtitle_files(info, item, root, events, opts)
+        subtitles, missing = subtitle_files(info, item, root, events, opts, pace_of(request))
     temp = target.with_name("." + target.stem + ".assembling." + extension)
     args = []
     if mode == "video-audio":
