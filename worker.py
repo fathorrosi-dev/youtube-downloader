@@ -15,7 +15,16 @@ from pathlib import Path
 import yt_dlp
 from yt_dlp.networking import Request
 from yt_dlp.utils import ISO639Utils
-from model import container, basename, variant, classify, pace_of, pace_profile
+from model import (
+    container,
+    basename,
+    variant,
+    classify,
+    pace_of,
+    pace_profile,
+    subtitle_path,
+    subtitle_prefix,
+)
 from store import BASE, probe
 
 
@@ -271,12 +280,6 @@ def path_too_long(path, windows=None, limit=WINDOWS_PATH_LIMIT):
     return len(str(path)) if windows and len(str(path)) > limit else None
 
 
-def subtitle_path(root, prefix, track):
-    suffix = track["origin"] + "-" + track["key"]
-    suffix = "".join(c if c.isalnum() or c in "-_" else "_" for c in suffix)
-    return root / "subtitle" / f"{prefix}.{suffix}.srt"
-
-
 # The longest the worker sleeps because a server asked it to. A Retry-After of an hour would
 # otherwise hold one subtitle of a playlist for an hour, once per attempt.
 MAX_RETRY_AFTER = 60
@@ -310,7 +313,7 @@ def longest_subtitle_path(root, item):
     download beside it (.vtt, .srt or .ttml followed by .part) or the conversion (.new.srt).
     None when the item has no subtitles. The format of the download is not known before the
     video is looked up, so the longest of the three is taken."""
-    prefix = basename(item)
+    prefix = subtitle_prefix(item)
     paths = []
     for track in item.get("subtitles", []):
         target = subtitle_path(root, prefix, track)
@@ -328,7 +331,7 @@ def subtitle_files(info, item, root, events, opts, pace=None, sleep=time.sleep):
     pace = pace or pace_profile()
     saved = []
     missing = []
-    prefix = basename(item)
+    prefix = subtitle_prefix(item)
     fetched = 0
     limited = 0
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -447,7 +450,7 @@ def adopt_result(item, root, target, mode, events):
     except (ValueError, OSError, subprocess.SubprocessError):
         return None
     events.send("stage", message="Hasil sebelumnya ditemukan; dicatat ke arsip", phase="finish")
-    prefix = basename(item)
+    prefix = subtitle_prefix(item)
     saved, missing = [], []
     for track in item.get("subtitles", []):
         path = subtitle_path(root, prefix, track)
@@ -524,12 +527,47 @@ def remove_temporary(folder):
     return True
 
 
+def download_subtitles(request, events, timings, opts):
+    """The subtitle-only mode: the subtitles of one video as .srt files in <output>/subtitle, and
+    nothing else. No video and no audio is downloaded, nothing is merged, and the result is not
+    one for the archive of downloads. A subtitle that is already on disk is kept and costs
+    nothing, so running the same choice again fetches only what is missing."""
+    item = request["item"]
+    root = Path(request["output"])
+    longest = longest_subtitle_path(root, item)
+    longest = longest and path_too_long(longest)
+    if longest:
+        raise ValueError(
+            f"Path file subtitle {longest} karakter, melewati batas Windows (260). "
+            "Pilih folder tujuan yang lebih pendek dengan --output."
+        )
+    events.send("stage", message="Memeriksa subtitle yang tersedia", phase="metadata")
+    with timings.phase("metadata"), yt_dlp.YoutubeDL({**opts, "skip_download": True}) as ydl:
+        info = ydl.extract_info(item["url"], download=False)
+    if not info:
+        raise ValueError("Informasi video kosong")
+    if info.get("live_status") in ("is_live", "is_upcoming"):
+        raise ValueError("Livestream aktif tidak didukung")
+    with timings.phase("subtitle"):
+        subtitles, missing = subtitle_files(info, item, root, events, opts, pace_of(request))
+    events.send("stage", message="Subtitle tersimpan")
+    return {
+        "path": str(root / "subtitle"),
+        "mode": "subtitle",
+        "subtitles": subtitles,
+        "missing": missing,
+        "timings": timings.report(),
+    }
+
+
 def download(request, events):
     timings = events.timings = Timings()
     item = request["item"]
     choice = item["choice"]
     root = Path(request["output"])
     opts = options(request, events)
+    if choice["mode"] == "subtitle":
+        return download_subtitles(request, events, timings, opts)
     prefix = basename(item)
     mode = choice["mode"]
     extension = container(choice, item.get("subtitles"))

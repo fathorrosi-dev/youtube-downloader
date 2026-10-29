@@ -39,6 +39,8 @@ from model import (
     container,
     variant,
     phases,
+    subtitle_path,
+    subtitle_prefix,
     item_indices,
     codec_name,
     compatible_audio,
@@ -172,6 +174,8 @@ def format_label(f):
 
 def settings_plan(mode, has_subtitles):
     """The numbered prompts that follow the choice of mode, in the order they are asked."""
+    if mode == "subtitle":
+        return ["subtitles", "confirm"]
     plan = []
     if mode != "audio":
         plan += ["container", "quality"]
@@ -541,25 +545,31 @@ def ask_subtitles(ui, preset, mode, compatible, metadata, all_tracks, step, prev
         if missing:
             ui.say(Text("Subtitle tidak tersedia: " + ", ".join(missing), style=DIM))
         return chosen, None
-    kwargs = {"default": previous["addon"]} if previous and "addon" in previous else {}
-    addon = ui.choose(
-        "Tambahan subtitle",
-        [("Tanpa subtitle", False), ("Pilih bahasa/track subtitle", True)],
-        step=step,
-        label="Subtitle",
-        **kwargs,
-    )
-    if not addon:
-        return [], False
-    if mode == "audio":
-        ui.say(Text("Audio saja: subtitle disimpan sebagai file .srt.", style=DIM))
-    elif compatible:
+    if mode == "subtitle":
+        # The subtitles are all there is to this download: not asked whether they are wanted.
         ui.say(
-            Text(
-                "MP4 kompatibel: subtitle disimpan sebagai file .srt di folder subtitle.",
-                style=DIM,
-            )
+            Text("Subtitle saja: file .srt di folder subtitle, tanpa video dan audio.", style=DIM)
         )
+    else:
+        kwargs = {"default": previous["addon"]} if previous and "addon" in previous else {}
+        addon = ui.choose(
+            "Tambahan subtitle",
+            [("Tanpa subtitle", False), ("Pilih bahasa/track subtitle", True)],
+            step=step,
+            label="Subtitle",
+            **kwargs,
+        )
+        if not addon:
+            return [], False
+        if mode == "audio":
+            ui.say(Text("Audio saja: subtitle disimpan sebagai file .srt.", style=DIM))
+        elif compatible:
+            ui.say(
+                Text(
+                    "MP4 kompatibel: subtitle disimpan sebagai file .srt di folder subtitle.",
+                    style=DIM,
+                )
+            )
     total = len(metadata)
     cover = track_coverage(metadata) if total > 1 else {}
 
@@ -621,18 +631,16 @@ def ask_settings(ui, metadata, all_tracks, preset, previous=None):
     """Every numbered prompt after the link. `previous` holds the earlier answers when the person
     chose to change them."""
     preset["_used"] = set()
+    modes = [
+        ("Video + audio", "video-audio"),
+        ("Audio saja", "audio"),
+        ("Video saja — tanpa suara", "video"),
+    ]
+    if all_tracks:
+        # Without a track there is nothing to save, so the choice is not offered.
+        modes.append(("Subtitle saja — tanpa video dan audio", "subtitle"))
     mode = ask(
-        ui,
-        preset,
-        "mode",
-        "Apa yang ingin diunduh?",
-        [
-            ("Video + audio", "video-audio"),
-            ("Audio saja", "audio"),
-            ("Video saja — tanpa suara", "video"),
-        ],
-        "Unduh apa?",
-        previous=previous,
+        ui, preset, "mode", "Apa yang ingin diunduh?", modes, "Unduh apa?", previous=previous
     )
     steps = Steps(len(settings_plan(mode, bool(all_tracks))))
     answers = {"mode": mode}
@@ -640,7 +648,7 @@ def ask_settings(ui, metadata, all_tracks, preset, previous=None):
     manual = False
     audio_format = "original"
     compatible = False
-    if mode != "audio":
+    if mode in ("video-audio", "video"):
         sound = " + AAC" if mode == "video-audio" else ""
         compatible = ask(
             ui,
@@ -687,7 +695,7 @@ def ask_settings(ui, metadata, all_tracks, preset, previous=None):
         if manual:
             quality = "best"
     lang = "original"
-    if mode != "video":
+    if mode in ("video-audio", "audio"):
         available = sorted({lang for m in metadata for lang in languages(m)})
         lang = ask(
             ui,
@@ -734,6 +742,11 @@ def ask_settings(ui, metadata, all_tracks, preset, previous=None):
         answers["chosen"] = chosen
         if addon is not None:
             answers["addon"] = addon
+        if mode == "subtitle" and not chosen:
+            raise SelectionError(
+                "Mode subtitle membutuhkan track yang dipilih: tambahkan --subs id,en "
+                "(--subs none dan --yes tidak memilih apa pun)"
+            )
     else:
         preset["_used"].add("subs")
         ui.say(Text("YouTube tidak mengembalikan subtitle untuk pilihan ini.", style=DIM))
@@ -839,30 +852,38 @@ def build_items(ui, metadata, all_tracks, settings_):
             "status": "pending",
         }
         items.append(item)
-        actual = (
-            f"{choice['actual_quality']}p · {choice['width']}×{choice['height']} · {choice['fps'] or '—'}fps · {choice.get('dynamic_range') or 'SDR'}"
-            if mode != "audio"
-            else choice["audio_format"]
-        )
-        if quality != "best" and choice["actual_quality"] and choice["actual_quality"] != quality:
-            actual += f" · turun dari {quality}p"
         extension = container(choice, selected_tracks)
-        if compatible and extension != "mp4":
-            not_mp4 += 1
-        codecs = ""
-        if mode != "audio":
-            codecs = codec_name(choice["vcodec"])
-            if mode == "video-audio":
-                codecs += " + " + codec_name(choice["acodec"])
-            codecs += " · "
-        details = (
-            f"{extension.upper()} · {codecs}audio {language if mode != 'video' else 'tanpa suara'} · "
-            + (
-                "≈ " + size(choice["estimated_size"])
-                if choice["estimated_size"]
-                else "ukuran belum diketahui"
+        if mode == "subtitle":
+            actual = "Subtitle saja"
+            details = "SRT di folder subtitle"
+        else:
+            actual = (
+                f"{choice['actual_quality']}p · {choice['width']}×{choice['height']} · {choice['fps'] or '—'}fps · {choice.get('dynamic_range') or 'SDR'}"
+                if mode != "audio"
+                else choice["audio_format"]
             )
-        )
+            if (
+                quality != "best"
+                and choice["actual_quality"]
+                and choice["actual_quality"] != quality
+            ):
+                actual += f" · turun dari {quality}p"
+            if compatible and extension != "mp4":
+                not_mp4 += 1
+            codecs = ""
+            if mode != "audio":
+                codecs = codec_name(choice["vcodec"])
+                if mode == "video-audio":
+                    codecs += " + " + codec_name(choice["acodec"])
+                codecs += " · "
+            details = (
+                f"{extension.upper()} · {codecs}audio {language if mode != 'video' else 'tanpa suara'} · "
+                + (
+                    "≈ " + size(choice["estimated_size"])
+                    if choice["estimated_size"]
+                    else "ukuran belum diketahui"
+                )
+            )
         # A video that offers no subtitles has nothing to say about them. Every other one says
         # what was asked for, so "none" and "forgot to pick" no longer look the same.
         if all_tracks and not selected_tracks:
@@ -1000,6 +1021,29 @@ def subtitles_limited(result):
     return any(m.get("reason") == "limited" for m in (result or {}).get("missing", []))
 
 
+def saved_subtitles(item, root):
+    """The result of an item of the subtitle-only mode whose files are all on disk, or None when
+    one is missing (or the item has none): the worker is asked only for what is not there."""
+    prefix = subtitle_prefix(item)
+    saved = []
+    for track in item.get("subtitles", []):
+        path = subtitle_path(Path(root), prefix, track)
+        try:
+            if not (path.is_file() and path.stat().st_size):
+                return None
+        except OSError:
+            return None
+        saved.append({**track, "path": str(path)})
+    if not saved:
+        return None
+    return {
+        "path": str(Path(root) / "subtitle"),
+        "mode": "subtitle",
+        "subtitles": saved,
+        "missing": [],
+    }
+
+
 def execute(ui, job):
     native_output(job["output"])
     if job.get("browser") and (
@@ -1026,7 +1070,14 @@ def execute(ui, job):
             try:
                 for item in job["items"]:
                     key = variant(item)
-                    previous = archive.get(key, item["choice"]["mode"], job["output"])
+                    # Subtitles saved on their own are not in the archive of downloads: they are
+                    # complete when every file is on disk.
+                    only_subtitles = item["choice"]["mode"] == "subtitle"
+                    previous = (
+                        saved_subtitles(item, job["output"])
+                        if only_subtitles
+                        else archive.get(key, item["choice"]["mode"], job["output"])
+                    )
                     if previous and not previous.get("missing"):
                         item["status"] = "complete"
                         item["result"] = previous
@@ -1046,7 +1097,7 @@ def execute(ui, job):
                         "browser": job.get("browser"),
                         "pace": current_pace(),
                     }
-                    if previous:
+                    if previous and not only_subtitles:
                         request["existing_file"] = previous["path"]
                     item["status"] = "running"
                     checkpoint()
@@ -1060,7 +1111,8 @@ def execute(ui, job):
                             result.pop("timings", None) if isinstance(result, dict) else None
                         )
                         try:
-                            archive.put(key, result)
+                            if not only_subtitles:
+                                archive.put(key, result)
                         except (
                             ValueError,
                             OSError,
@@ -1139,7 +1191,12 @@ def emit_paths(job, scripted):
     for item in job["items"]:
         result = item.get("result")
         if item.get("status") in ("complete", "partial") and result:
-            print(result["path"], flush=True)
+            if result.get("mode") == "subtitle":
+                # The result of this mode is a set of files, not one.
+                for track in result.get("subtitles") or []:
+                    print(track["path"], flush=True)
+            else:
+                print(result["path"], flush=True)
 
 
 def pin_note(name, actual):
@@ -1620,7 +1677,7 @@ def build_parser():
     scripting = parser.add_argument_group(
         "tanpa menu (untuk link)", "Jawaban untuk pertanyaan wizard; --yes memakai bawaan sisanya."
     )
-    scripting.add_argument("--mode", choices=["video-audio", "audio", "video"])
+    scripting.add_argument("--mode", choices=["video-audio", "audio", "video", "subtitle"])
     scripting.add_argument("--quality", type=quality_arg, help="best atau tinggi video, mis. 1080")
     scripting.add_argument("--format", choices=["auto", "mp4"], help="mp4 = MP4 kompatibel")
     scripting.add_argument("--lang", help="Bahasa audio, atau original")

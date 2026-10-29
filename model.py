@@ -10,7 +10,8 @@ from urllib.parse import urlparse, parse_qs
 VERSION = "1.3.1"
 # A yt-dlp release older than this many days is worth a hint when downloads fail.
 PIN_WARN_DAYS = 45
-MODES = ("video-audio", "audio", "video")
+MODES = ("video-audio", "audio", "video", "subtitle")
+# "subtitle" saves only the subtitles: no video, no audio, nothing in the archive of downloads.
 
 
 class SelectionError(ValueError):
@@ -106,6 +107,24 @@ def pick(
     a = None
     if mode not in MODES:
         raise SelectionError("Mode tidak valid")
+    if mode == "subtitle":
+        # Nothing of the media is chosen, and nothing of it is in the identity of the item.
+        return {
+            "mode": mode,
+            "quality": None,
+            "actual_quality": None,
+            "language": None,
+            "audio_format": None,
+            "video_format": None,
+            "audio_format_id": None,
+            "width": None,
+            "height": None,
+            "fps": None,
+            "vcodec": None,
+            "dynamic_range": None,
+            "acodec": None,
+            "estimated_size": 0,
+        }
     # "MP4 kompatibel" only concerns the video file, and only when the user did not pick the
     # streams by hand: a hand-picked stream is used as chosen.
     compatible = bool(compatible) and mode != "audio"
@@ -198,6 +217,8 @@ def tracks(info):
 
 
 def container(choice, subtitles):
+    if choice["mode"] == "subtitle":
+        return "srt"
     if choice["mode"] == "audio":
         if choice["audio_format"] == "mp3":
             return "mp3"
@@ -234,6 +255,8 @@ def phases(item):
     The worker announces each one as a "stage" event whose "phase" is one of these keys. A stage
     can be skipped (a stream that is already on disk); the order never changes."""
     mode = item["choice"]["mode"]
+    if mode == "subtitle":
+        return ["metadata", "subtitle"]
     plan = ["metadata"]
     if mode != "audio":
         plan.append("video")
@@ -256,17 +279,42 @@ def variant(item):
     ).hexdigest()
 
 
-def basename(item):
+def title_of(item):
+    """The title of an item as it is written in a file name."""
     title = (
         re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", item.get("title") or item["id"]).strip(" .")[:100]
         or "video"
     )
-    title = title.encode("utf-8")[:140].decode("utf-8", errors="ignore")
+    return title.encode("utf-8")[:140].decode("utf-8", errors="ignore")
+
+
+def basename(item):
+    title = title_of(item)
     choice = item["choice"]
     quality = (
         str(choice["actual_quality"]) + "p" if choice["actual_quality"] else choice["audio_format"]
     )
     return f"{title} [{item['id']}] - {quality} - {choice['mode']} - {variant(item)[:10]}"
+
+
+def subtitle_prefix(item):
+    """The start of the name of the subtitle files of an item.
+
+    Subtitles that come with a download are named after it, so a different choice of quality or
+    format is a different set of files. Subtitles saved on their own are named after the video
+    only: what they are does not depend on anything that was chosen for a media file, and
+    running it again finds them."""
+    if item["choice"]["mode"] == "subtitle":
+        return f"{title_of(item)} [{item['id']}]"
+    return basename(item)
+
+
+def subtitle_path(root, prefix, track):
+    """Where the subtitle `track` is saved: <root>/subtitle/<prefix>.<origin>-<key>.srt, with
+    nothing in the last part but letters, digits, - and _."""
+    suffix = track["origin"] + "-" + track["key"]
+    suffix = "".join(c if c.isalnum() or c in "-_" else "_" for c in suffix)
+    return root / "subtitle" / f"{prefix}.{suffix}.srt"
 
 
 def item_indices(text, total):

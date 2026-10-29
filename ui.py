@@ -461,6 +461,18 @@ def picked_summary(names):
     return ", ".join(names) if len(names) <= 3 else f"{len(names)} dipilih"
 
 
+def subtitle_figures(result):
+    """For a result of the subtitle-only mode: how many .srt files it holds and their size."""
+    saved = result.get("subtitles") or []
+    total = 0
+    for track in saved:
+        try:
+            total += Path(track["path"]).stat().st_size
+        except OSError:
+            pass
+    return len(saved), total
+
+
 def without_bulk_keys(question):
     """Make Ctrl+A (tick every row) and Tab (invert) do nothing in a questionary checkbox.
 
@@ -655,23 +667,29 @@ class UI:
             shown = path.relative_to(root).as_posix()
         except ValueError:
             shown = str(path)
-        try:
-            weight = size(path.stat().st_size)
-        except OSError:
-            weight = "file tidak ditemukan"
         parts = []
-        if choice.get("mode") == "audio":
-            parts.append("MP3" if choice.get("audio_format") == "mp3" else "audio asli")
-            if choice.get("audio_format") != "mp3" and choice.get("acodec"):
-                parts.append(codec_name(choice["acodec"]))
+        if choice.get("mode") == "subtitle":
+            # A set of files in one folder, not a file: no codec, no size of its own.
+            count, total = subtitle_figures(result)
+            shown += "/"
+            parts = ["SRT", f"{count} subtitle", size(total)]
         else:
-            if choice.get("actual_quality"):
-                parts.append(f"{choice['actual_quality']}p")
-            codecs = codec_name(choice.get("vcodec"))
-            if choice.get("mode") == "video-audio":
-                codecs += " + " + codec_name(choice.get("acodec"))
-            parts.append(codecs)
-        parts += [path.suffix[1:].upper(), weight]
+            if choice.get("mode") == "audio":
+                parts.append("MP3" if choice.get("audio_format") == "mp3" else "audio asli")
+                if choice.get("audio_format") != "mp3" and choice.get("acodec"):
+                    parts.append(codec_name(choice["acodec"]))
+            else:
+                if choice.get("actual_quality"):
+                    parts.append(f"{choice['actual_quality']}p")
+                codecs = codec_name(choice.get("vcodec"))
+                if choice.get("mode") == "video-audio":
+                    codecs += " + " + codec_name(choice.get("acodec"))
+                parts.append(codecs)
+            try:
+                weight = size(path.stat().st_size)
+            except OSError:
+                weight = "file tidak ditemukan"
+            parts += [path.suffix[1:].upper(), weight]
         title = Text(str(item.get("title") or item.get("id") or shown), style="bold")
         if item["status"] == "partial":
             title.append(" · " + incomplete(result), style=DIM)
@@ -700,10 +718,15 @@ class UI:
                     shown = path.relative_to(root).as_posix()
                 except ValueError:
                     shown = str(path)
-                try:
-                    detail = size(path.stat().st_size)
-                except OSError:
-                    detail = "file tidak ditemukan"
+                if item["result"].get("mode") == "subtitle":
+                    count, total = subtitle_figures(item["result"])
+                    shown = f"{item.get('title') or item.get('id') or shown}"
+                    detail = f"{count} subtitle · {size(total)}"
+                else:
+                    try:
+                        detail = size(path.stat().st_size)
+                    except OSError:
+                        detail = "file tidak ditemukan"
                 if status == "partial":
                     detail += " · " + incomplete(item["result"])
                 rows.append(("warn" if status == "partial" else "ok", shown, detail))
