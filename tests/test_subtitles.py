@@ -149,6 +149,48 @@ class Summary(unittest.TestCase):
         self.assertLess(said.index("table"), said.index("Subtitle · x"))
 
 
+class Source(unittest.TestCase):
+    """A language that a video has translated from its creator's captions and again from the
+    automatic ones: which of the two is downloaded."""
+
+    def chosen(self, metadata, wanted=("id",)):
+        merged = app.merge_tracks(metadata)
+        identities, _ = app.subtitle_identities(merged, list(wanted))
+        items, *_ = app.build_items(None, metadata, merged, answers(identities))
+        return [t["key"] for t in items[0]["subtitles"]]
+
+    def test_the_translation_of_the_creators_captions_is_taken_whatever_the_audio_says(self):
+        # The audio is in "en" and the automatic captions are in "en": the translation made from
+        # them used to be picked, although the menu offered the one made from "en-US".
+        for audio in ("en", "ja", None):
+            info = full("vid00000001")
+            info["language"] = audio
+            self.assertEqual(self.chosen([info, full("vid00000002")]), ["id-en-US"], audio)
+
+    def test_a_video_without_creator_captions_gets_the_automatic_translation(self):
+        info = full("vid00000001", manual=None)
+        self.assertEqual(self.chosen([info]), ["id"])
+        # In a playlist each video takes what it has.
+        merged = [full("vid00000002"), full("vid00000003", manual=None)]
+        merged_ids = app.merge_tracks(merged)
+        identities, _ = app.subtitle_identities(merged_ids, ["id"])
+        items, *_ = app.build_items(None, merged, merged_ids, answers(identities))
+        self.assertEqual(
+            [[t["key"] for t in item["subtitles"]] for item in items], [["id-en-US"], ["id"]]
+        )
+
+    def test_the_summary_names_the_source_it_took(self):
+        _, rows, _, notes = self.build_rows([full("vid00000001"), full("vid00000002")])
+        self.assertIn("(terjemahan dari CC)", rows[0][2])
+        self.assertIn("terjemahan dari CC", notes[0])
+
+    @staticmethod
+    def build_rows(metadata):
+        merged = app.merge_tracks(metadata)
+        identities, _ = app.subtitle_identities(merged, ["id"])
+        return app.build_items(None, metadata, merged, answers(identities))
+
+
 ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[=>])")
 DOWN, ENTER, SPACE, TAB, CTRL_A, CTRL_C = "\x1b[B", "\r", " ", "\t", "\x01", "\x03"
 

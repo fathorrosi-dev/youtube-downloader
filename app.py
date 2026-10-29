@@ -498,6 +498,18 @@ def track_source(info, track):
     return "terjemahan dari " + ("CC" if written else "caption otomatis")
 
 
+def best_source(info, candidates):
+    """The track to take of one language that this video has from more than one source.
+
+    Only a translation can: of the creator's captions (key "id-en-US") and of the automatic ones
+    (key "id"). The first reads better, because a person wrote what it translates, so it comes
+    first whatever the language of the audio is; among equals the one made from the audio's own
+    language wins, then the first."""
+    written = info.get("subtitles") or {}
+    pool = [t for t in candidates if t["source"] in written] or candidates
+    return next((t for t in pool if t["source"] == default_language(info)), pool[0])
+
+
 def ask_subtitles(ui, preset, mode, compatible, metadata, all_tracks, step, previous):
     """The subtitle tracks to keep, as identities into all_tracks."""
     preset["_used"].add("subs")
@@ -750,9 +762,7 @@ def build_items(ui, metadata, all_tracks, settings_):
         for identity in chosen:
             candidates = tracks_for(m, identity)
             if candidates:
-                track = next(
-                    (t for t in candidates if t["source"] == default_language(m)), candidates[0]
-                )
+                track = best_source(m, candidates)
                 found[identity].append((m, track))
                 present.append(track)
             else:
