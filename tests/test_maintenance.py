@@ -98,6 +98,32 @@ class Release(unittest.TestCase):
         with self.assertRaises(ValueError):
             maintenance.migrate(self.old, dest)
 
+    def test_migrate_leaves_the_old_environments_and_caches_but_keeps_what_rollback_needs(self):
+        state = self.old / ".state"
+        with patch.object(maintenance, "setup"), redirect_stderr(io.StringIO()):
+            maintenance.update(self.new, self.old)
+        for name in ("venv-before-move-1/lib", "pip-cache/http", "cache/youtube", "jobs"):
+            (state / name).mkdir(parents=True, exist_ok=True)
+        (state / "venv-before-move-1/lib/x").write_text("old")
+        (state / "pip-cache/http/y").write_text("wheel")
+        (state / "cache/youtube/z").write_text("player")
+        (state / "jobs/a.json").write_text("{}")
+        (self.old / "notes/cache").mkdir(parents=True)
+        (self.old / "notes/cache/mine.txt").write_text("somebody's folder")
+        dest = self.root / "moved"
+        with patch.object(maintenance, "setup"), redirect_stdout(io.StringIO()):
+            maintenance.migrate(self.old, dest)
+        moved = dest / ".state"
+        for gone in ("venv-before-move-1", "pip-cache", "cache"):
+            self.assertFalse((moved / gone).exists(), gone)
+        self.assertEqual((moved / "jobs/a.json").read_text(), "{}")
+        self.assertEqual((moved / "downloaded.sqlite3").read_bytes(), b"archive unchanged")
+        self.assertEqual((dest / "notes/cache/mine.txt").read_text(), "somebody's folder")
+        self.assertTrue((state / "venv-before-move-1/lib/x").exists())  # the source is untouched
+        with patch.object(maintenance, "setup"), redirect_stdout(io.StringIO()):
+            maintenance.rollback(dest)
+        self.assertEqual((dest / "app.py").read_text(), "0.9.0")
+
     def test_shared_lock_refuses_maintenance(self):
         with patch.object(store, "STATE", self.old / ".state"):
             with store.lock():

@@ -748,15 +748,33 @@ def clean(root, apply=False, days=CLEAN_DAYS, abandoned=False):
     return rows
 
 
+# What a move leaves behind. The first names are skipped wherever they are; the second ones only
+# directly under .state, because a folder called "cache" elsewhere may be somebody's own.
+# Setup builds a new environment, and the old ones, pip's cache and yt-dlp's cache are what
+# `clean` calls leftovers. Rollback restores the program from .state/program-backups, which is
+# copied, and never from them.
+NOT_MOVED = (".venv", ".runtime", "__pycache__", "run.lock", ".git")
+NOT_MOVED_FROM_STATE = ("venv-before-move-*", "pip-cache", "cache")
+
+
+def moving_ignore(source):
+    everywhere = shutil.ignore_patterns(*NOT_MOVED)
+    in_state = shutil.ignore_patterns(*NOT_MOVED_FROM_STATE)
+    state = Path(source) / ".state"
+
+    def ignore(directory, names):
+        skipped = set(everywhere(directory, names))
+        if Path(directory) == state:
+            skipped |= set(in_state(directory, names))
+        return skipped
+
+    return ignore
+
+
 def migrate(source, dest):
     if dest == source or dest.is_relative_to(source) or (dest.exists() and any(dest.iterdir())):
         raise ValueError("Pilih folder kosong di luar sumber")
-    shutil.copytree(
-        source,
-        dest,
-        dirs_exist_ok=True,
-        ignore=shutil.ignore_patterns(".venv", ".runtime", "__pycache__", "run.lock", ".git"),
-    )
+    shutil.copytree(source, dest, dirs_exist_ok=True, ignore=moving_ignore(source))
     # Reuse an installed runtime; setup verifies its version/architecture before use.
     binary = deno_path(source)
     if (
