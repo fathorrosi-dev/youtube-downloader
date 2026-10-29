@@ -472,6 +472,32 @@ def subtitle_identities(all_tracks, wanted):
     return chosen, missing
 
 
+TRACK_KINDS = {
+    "manual": "CC asli",
+    "automatic": "Caption otomatis",
+    "translated": "Terjemahan otomatis",
+}
+
+
+def tracks_for(info, identity):
+    """The tracks of one video that an identity of merge_tracks() stands for. Several when the
+    identity is a language of a playlist and the video has it from more than one source."""
+    found = [t for t in tracks(info) if (t["language"], t["kind"]) == identity[:2]]
+    if len(identity) > 2:
+        found = [t for t in found if (t["key"], t["origin"]) == identity[2:]]
+    return found
+
+
+def track_source(info, track):
+    """Where a track of this video comes from, in words. A translation is made from the creator's
+    captions when the video has them in the source language, and from the automatic ones if not;
+    the second reads worse, and the name of the track does not always say which it is."""
+    if track["kind"] != "translated":
+        return TRACK_KINDS[track["kind"]].lower()
+    written = track["source"] in (info.get("subtitles") or {})
+    return "terjemahan dari " + ("CC" if written else "caption otomatis")
+
+
 def ask_subtitles(ui, preset, mode, compatible, metadata, all_tracks, step, previous):
     """The subtitle tracks to keep, as identities into all_tracks."""
     preset["_used"].add("subs")
@@ -496,11 +522,6 @@ def ask_subtitles(ui, preset, mode, compatible, metadata, all_tracks, step, prev
     )
     if not addon:
         return [], False
-    names = {
-        "manual": "CC asli",
-        "automatic": "Caption otomatis",
-        "translated": "Terjemahan otomatis",
-    }
     if mode == "audio":
         ui.say(Text("Audio saja: subtitle disimpan sebagai file .srt.", style=DIM))
     elif compatible:
@@ -512,7 +533,7 @@ def ask_subtitles(ui, preset, mode, compatible, metadata, all_tracks, step, prev
         )
     options = [
         (
-            f"{t['name']} · {names[t['kind']]}"
+            f"{t['name']} · {TRACK_KINDS[t['kind']]}"
             + (
                 " · sumber dipilih per video"
                 if len(metadata) > 1 and t["kind"] == "translated"
@@ -679,6 +700,9 @@ def build_items(ui, metadata, all_tracks, settings_):
     items = []
     rows = []
     not_mp4 = 0
+    # Per requested track: what each video has of it, and the videos that have none.
+    found = {identity: [] for identity in chosen}
+    lacking = {identity: [] for identity in chosen}
     for m in metadata:
         language = default_language(m) if lang == "original" else lang
         video_id = None
@@ -721,21 +745,23 @@ def build_items(ui, metadata, all_tracks, settings_):
             rows.append((m["title"], "DILEWATI", str(exc)))
             continue
         selected_tracks = []
-        current_tracks = tracks(m)
+        present = []
+        absent = []
         for identity in chosen:
-            candidates = [t for t in current_tracks if (t["language"], t["kind"]) == identity[:2]]
-            if len(identity) > 2:
-                candidates = [t for t in candidates if (t["key"], t["origin"]) == identity[2:]]
+            candidates = tracks_for(m, identity)
             if candidates:
-                selected_tracks.append(
-                    next(
-                        (t for t in candidates if t["source"] == default_language(m)), candidates[0]
-                    )
+                track = next(
+                    (t for t in candidates if t["source"] == default_language(m)), candidates[0]
                 )
+                found[identity].append((m, track))
+                present.append(track)
             else:
-                expected = all_tracks[identity]
-                # Keep requested tracks so absence is recorded instead of silently disappearing.
-                selected_tracks.append(expected)
+                track = all_tracks[identity]
+                lacking[identity].append(m["title"])
+                absent.append(track)
+            # A requested track the video does not have is kept in the item, so that its absence
+            # is recorded and said at the end instead of silently disappearing.
+            selected_tracks.append(track)
         item = {
             "id": m["id"],
             "title": m["title"],
@@ -769,21 +795,55 @@ def build_items(ui, metadata, all_tracks, settings_):
                 else "ukuran belum diketahui"
             )
         )
-        if selected_tracks:
-            details += " · subtitle " + ", ".join(t["name"] for t in selected_tracks)
+        # A video that offers no subtitles has nothing to say about them. Every other one says
+        # what was asked for, so "none" and "forgot to pick" no longer look the same.
+        if all_tracks and not selected_tracks:
+            details += " · tanpa subtitle"
+        if present:
+            details += " · subtitle " + ", ".join(
+                f"{t['name']} ({track_source(m, t)})" for t in present
+            )
             if extension == "mp4":
                 details += " (.srt terpisah)"
+        if absent:
+            details += " · tidak ada di video ini: " + ", ".join(t["name"] for t in absent)
         rows.append((m["title"], actual, details))
-    return items, rows, not_mp4
+    return items, rows, not_mp4, subtitle_notes(found, lacking, all_tracks, len(items))
 
 
-def show_summary(ui, rows, root, not_mp4):
+def subtitle_notes(found, lacking, all_tracks, total):
+    """The line of the summary for each requested subtitle track of a playlist: how many of the
+    videos have it, and from what. A single video says all of this in its own row."""
+    if total < 2:
+        return []
+    if not found:
+        return ["Subtitle · tanpa"] if all_tracks else []
+    notes = []
+    for identity, have in found.items():
+        line = f"Subtitle · {all_tracks[identity]['name']} · {len(have)}/{total} item"
+        sources = {}
+        for info, track in have:
+            word = track_source(info, track)
+            sources[word] = sources.get(word, 0) + 1
+        if len(sources) == 1:
+            line += " · " + next(iter(sources))
+        elif sources:
+            line += " · " + ", ".join(f"{word} ({count})" for word, count in sources.items())
+        if lacking[identity]:
+            line += f" · {len(lacking[identity])} item tidak punya track ini"
+        notes.append(line)
+    return notes
+
+
+def show_summary(ui, rows, root, not_mp4, notes=()):
     ui.say("")
     if len(rows) == 1:
         ui.table(("Video", "Kualitas", "Berkas", "Simpan di"), [(*rows[0], tidy(root))])
     else:
         ui.table(("Video", "Kualitas", "Berkas"), rows)
         ui.say(Text.assemble(("Simpan di ", DIM), tidy(root)))
+    for note in notes:
+        ui.say(Text(note, style=DIM))
     if not_mp4:
         ui.say(
             Text(
@@ -830,10 +890,10 @@ def wizard(ui, url, browser=None, output=None, preset=None):
         answers = ask_settings(
             ui, metadata, all_tracks, preset, answers["answers"] if answers else None
         )
-        items, rows, not_mp4 = build_items(ui, metadata, all_tracks, answers)
+        items, rows, not_mp4, notes = build_items(ui, metadata, all_tracks, answers)
         if not items:
             raise ValueError("Tidak ada item yang memenuhi pilihan")
-        show_summary(ui, rows, root, not_mp4)
+        show_summary(ui, rows, root, not_mp4, notes)
         decision = confirm(ui, preset, answers["steps"])
         if decision == "edit":
             ui.say(Text("Mengubah pilihan · info video tidak diambil ulang", style=DIM))

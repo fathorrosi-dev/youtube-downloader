@@ -15,6 +15,7 @@ import app
 import model
 import captions
 from terminal import Terminal
+from test_tools import synthetic
 
 
 class Shape(unittest.TestCase):
@@ -63,6 +64,89 @@ class Shape(unittest.TestCase):
         self.assertEqual([merged[identity]["language"] for identity in chosen], ["id"])
         english, _ = app.subtitle_identities(merged, ["en-US"])
         self.assertEqual(merged[english[0]]["kind"], "manual")
+
+
+def full(video_id, **kwargs):
+    """Metadata with the formats of test_tools.synthetic() and the captions of captions.video()."""
+    info = synthetic()
+    given = captions.video(video_id, **kwargs)
+    for key in ("id", "title", "language", "subtitles", "automatic_captions"):
+        info[key] = given[key]
+    info["webpage_url"] = "https://www.youtube.com/watch?v=" + video_id
+    return info
+
+
+def answers(chosen, **kwargs):
+    return {
+        "mode": "video-audio",
+        "quality": "best",
+        "manual": False,
+        "lang": "original",
+        "audio_format": "original",
+        "compatible": False,
+        "chosen": chosen,
+        **kwargs,
+    }
+
+
+class Summary(unittest.TestCase):
+    """What the summary before "Mulai" says about subtitles."""
+
+    def build(self, metadata, wanted, **kwargs):
+        merged = app.merge_tracks(metadata)
+        chosen, _ = app.subtitle_identities(merged, wanted)
+        return app.build_items(None, metadata, merged, answers(chosen, **kwargs))
+
+    def test_no_subtitles_is_said_for_a_video_that_has_them(self):
+        items, rows, _, notes = self.build([full("one00000001")], [])
+        self.assertIn("tanpa subtitle", rows[0][2])
+        self.assertEqual(notes, [])
+        self.assertEqual(items[0]["subtitles"], [])
+
+    def test_a_video_without_any_captions_says_nothing_about_them(self):
+        info = full("one00000001")
+        info["subtitles"], info["automatic_captions"] = {}, {}
+        _, rows, _, notes = self.build([info], [])
+        self.assertNotIn("subtitle", rows[0][2])
+        self.assertEqual(notes, [])
+
+    def test_a_chosen_track_is_named_with_where_it_comes_from(self):
+        _, rows, _, _ = self.build([full("one00000001")], ["id"], compatible=True)
+        self.assertRegex(
+            rows[0][2], r"subtitle Indonesian .*\(terjemahan dari (CC|caption otomatis)\)"
+        )
+        self.assertIn("(.srt terpisah)", rows[0][2])
+
+    def test_a_playlist_says_how_many_videos_have_each_chosen_track(self):
+        without = [(c, n) for c, n in captions.TRANSLATIONS if c != "id"]
+        metadata = [
+            full("vid00000001"),
+            full("vid00000002", translations=without),
+            full("vid00000003"),
+        ]
+        _, rows, _, notes = self.build(metadata, ["id"])
+        self.assertEqual(len(notes), 1)
+        self.assertRegex(notes[0], r"Indonesian.* · 2/3 item")
+        self.assertIn("1 item tidak punya track ini", notes[0])
+        self.assertIn("tidak ada di video ini: Indonesian", rows[1][2])
+
+    def test_a_playlist_without_subtitles_says_so_once(self):
+        metadata = [full("vid00000001"), full("vid00000002")]
+        _, _, _, notes = self.build(metadata, [])
+        self.assertEqual(notes, ["Subtitle · tanpa"])
+
+    def test_the_notes_are_printed_under_the_table(self):
+        said = []
+
+        class Ui:
+            def say(self, message, *rest):
+                said.append(str(message))
+
+            def table(self, headers, rows):
+                said.append("table")
+
+        app.show_summary(Ui(), [("a", "b", "c"), ("d", "e", "f")], "/tmp", 0, ["Subtitle · x"])
+        self.assertLess(said.index("table"), said.index("Subtitle · x"))
 
 
 ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[=>])")
