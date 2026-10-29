@@ -305,6 +305,19 @@ def failure_reason(exc):
     return "failed"
 
 
+def longest_subtitle_path(root, item):
+    """The longest path that saving the subtitles of `item` writes to: a subtitle itself, the
+    download beside it (.vtt, .srt or .ttml followed by .part) or the conversion (.new.srt).
+    None when the item has no subtitles. The format of the download is not known before the
+    video is looked up, so the longest of the three is taken."""
+    prefix = basename(item)
+    paths = []
+    for track in item.get("subtitles", []):
+        target = subtitle_path(root, prefix, track)
+        paths += [target, target.with_suffix(".ttml.part"), target.with_suffix(".new.srt")]
+    return max(paths, key=lambda path: len(str(path)), default=None)
+
+
 def subtitle_files(info, item, root, events, opts, pace=None, sleep=time.sleep):
     """Save the subtitles of `item` as .srt files. Returns (saved, missing): the tracks saved,
     with their path, and the tracks that were not, each with the `reason` it was not.
@@ -525,6 +538,17 @@ def download(request, events):
     if longest:
         raise ValueError(
             f"Path file sementara {longest} karakter, melewati batas Windows (260). "
+            "Pilih folder tujuan yang lebih pendek dengan --output."
+        )
+    # The subtitles sit in another folder and have a longer name than the media (the language
+    # and where it comes from are added to it), so their paths are checked as well, before
+    # anything is downloaded: a subtitle that cannot be written is a media file that cannot be
+    # finished.
+    longest_subtitle = longest_subtitle_path(root, item)
+    longest = longest_subtitle and path_too_long(longest_subtitle)
+    if longest:
+        raise ValueError(
+            f"Path file subtitle {longest} karakter, melewati batas Windows (260). "
             "Pilih folder tujuan yang lebih pendek dengan --output."
         )
     target.parent.mkdir(parents=True, exist_ok=True)

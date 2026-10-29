@@ -9,7 +9,7 @@ import threading
 import unittest
 from contextlib import redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
@@ -20,6 +20,7 @@ import app
 import model
 import store
 import worker
+from test_tools import synthetic
 
 VTT = b"WEBVTT\n\n00:00:00.000 --> 00:00:00.800\nHello\n"
 
@@ -237,6 +238,91 @@ class Fetching(unittest.TestCase):
         self.assertEqual(worker.failure_reason(OSError("disk")), "failed")
         for code in ("limited", "ffmpeg", "empty", "failed", "unavailable", "path"):
             self.assertIn(code, model.MISSING_REASONS)
+
+
+class Paths(unittest.TestCase):
+    """The length of the paths a subtitle is written to, on Windows."""
+
+    @staticmethod
+    def item(*keys, title="T" * 100):
+        tracks = [
+            {
+                "key": key,
+                "origin": "automatic_captions",
+                "language": key,
+                "kind": "translated",
+                "name": key,
+                "source": "en-US",
+            }
+            for key in keys
+        ]
+        return {
+            "id": "abcdefghijk",
+            "title": title,
+            "url": "https://youtu.be/abcdefghijk",
+            "choice": model.pick(
+                synthetic(), "video-audio", "best", "en", "original", None, None, False
+            ),
+            "subtitles": tracks,
+        }
+
+    def test_the_longest_path_is_the_download_of_the_longest_track(self):
+        root = PureWindowsPath("C:/media")
+        item = self.item("id", "zh-Hans-en-US")
+        longest = worker.longest_subtitle_path(root, item)
+        self.assertTrue(str(longest).endswith("automatic_captions-zh-Hans-en-US.ttml.part"))
+        final = worker.subtitle_path(root, model.basename(item), item["subtitles"][1])
+        self.assertGreater(len(str(longest)), len(str(final)))
+
+    def test_an_item_without_subtitles_has_no_such_path(self):
+        self.assertIsNone(worker.longest_subtitle_path(PureWindowsPath("C:/media"), self.item()))
+
+    def test_there_are_folders_where_the_media_fits_and_its_subtitles_do_not(self):
+        item = self.item("id", "zh-Hans-en-US")
+        prefix = model.basename(item)
+        limit = worker.WINDOWS_PATH_LIMIT
+        found = []
+        for depth in range(20, 140):
+            root = PureWindowsPath("C:/" + "a" * depth)
+            media = root / "video" / (prefix + ".mkv")
+            assembling = media.with_name("." + media.stem + ".assembling.mkv")
+            subtitle = worker.longest_subtitle_path(root, item)
+            if len(str(assembling)) <= limit < len(str(subtitle)):
+                found.append(depth)
+        # The check on the media alone let these through: a window of about thirty folder
+        # names deep.
+        self.assertGreater(len(found), 10)
+
+    def test_a_long_destination_for_subtitles_is_refused_before_anything_is_downloaded(self):
+        item = self.item("id")
+        events = []
+
+        class Events:
+            def send(self, kind, **kwargs):
+                events.append(kind)
+
+            hook = pp_hook = staticmethod(lambda *a: None)
+
+        def too_long(path, **kwargs):
+            return 270 if "subtitle" in str(path) else None
+
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(worker, "path_too_long", side_effect=too_long),
+            patch.object(worker.yt_dlp, "YoutubeDL") as extractor,
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "subtitle 270 karakter.*batas Windows.*--output"
+            ):
+                worker.download({"item": item, "output": folder}, Events())
+            extractor.assert_not_called()
+            self.assertEqual(list(Path(folder).iterdir()), [])  # nothing was created either
+
+    def test_an_item_whose_paths_fit_is_not_refused(self):
+        item = self.item("id")
+        self.assertIsNone(
+            worker.path_too_long(worker.longest_subtitle_path(Path("/media"), item), windows=True)
+        )
 
 
 class Batch(unittest.TestCase):
