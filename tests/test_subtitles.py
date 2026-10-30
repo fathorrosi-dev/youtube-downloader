@@ -280,9 +280,13 @@ class Incomplete(unittest.TestCase):
                 unittest.mock.patch.object(store, "STATE", Path(folder) / "state"),
             ):
                 archive = store.Archive()
-                self.addCleanup(archive.close)
-                archive.put("v", result)
-                found = archive.get("v", "audio")
+                try:
+                    archive.put("v", result)
+                    found = archive.get("v", "audio")
+                finally:
+                    # Closed before the folder goes: Windows will not delete a sqlite file that
+                    # is still open (WinError 32), and an addCleanup would run after the folder.
+                    archive.close()
         reasons = {x["key"]: x.get("reason") for x in found["missing"]}
         self.assertEqual(reasons, {"id": "limited", "en": "gone"})
 
@@ -331,7 +335,13 @@ def read(term, seconds):
 
 def ask(script, steps, timeout=30):
     """Run `script` on a real pseudo-terminal and play `steps` into it: a key to press, or
-    ("shows", text) to wait until the text has appeared. Returns what the script printed."""
+    ("shows", text) to wait until the text has appeared. Returns what the script printed.
+
+    The first step has to be a ("shows", ...): python takes longer to start and import on Windows
+    (ConPTY) than the pause before a key, and a key sent before the first prompt is up never
+    reaches it."""
+    if steps and not isinstance(steps[0], tuple):
+        raise ValueError("start with a ('shows', text) step: a key sent before the prompt is lost")
     raw = ""
     deadline = time.monotonic() + timeout
     with Terminal([sys.executable, "-c", script], BASE) as term:
@@ -473,13 +483,16 @@ class Coverage(unittest.TestCase):
         self.assertEqual(set(found), set(app.merge_tracks(metadata)))
 
 
+ADDON = ("shows", "Tambahan subtitle")  # the yes/no the question opens with
+
+
 class Picker(unittest.TestCase):
     """The question about subtitles as the wizard asks it, on a pseudo-terminal."""
 
     def test_captions_are_listed_first_with_one_row_for_the_translations(self):
         out = ask(
             subtitle_menu(3),
-            [DOWN, ENTER, ("shows", "Terjemahan ke bahasa lain"), CTRL_C],
+            [ADDON, DOWN, ENTER, ("shows", "Terjemahan ke bahasa lain"), CTRL_C],
             timeout=30,
         )
         shown = out.split("Terjemahan ke bahasa lain")[0]
@@ -492,7 +505,7 @@ class Picker(unittest.TestCase):
     def test_the_language_is_found_in_the_second_list_by_typing(self):
         out = ask(
             subtitle_menu(3),
-            [DOWN, ENTER, ("shows", "Terjemahan ke bahasa lain")]
+            [ADDON, DOWN, ENTER, ("shows", "Terjemahan ke bahasa lain")]
             + list("terjemahan")
             + [SPACE, ENTER, ("shows", "Terjemahan subtitle")]
             + list("indonesia")
@@ -505,7 +518,7 @@ class Picker(unittest.TestCase):
 
     def test_the_translations_are_not_asked_for_unless_the_row_is_ticked(self):
         n = len(originals_of(3))
-        out = ask(subtitle_menu(3), [DOWN, ENTER, ("shows", "Track subtitle"), SPACE, ENTER])
+        out = ask(subtitle_menu(3), [ADDON, DOWN, ENTER, ("shows", "Track subtitle"), SPACE, ENTER])
         self.assertEqual(len(result(out)), 1)
         self.assertGreaterEqual(n, 1)
         self.assertNotIn("Terjemahan subtitle", out)
@@ -514,7 +527,7 @@ class Picker(unittest.TestCase):
         n = len(originals_of(3))
         out = ask(
             subtitle_menu(3),
-            [DOWN, ENTER, ("shows", "Track subtitle"), SPACE]
+            [ADDON, DOWN, ENTER, ("shows", "Track subtitle"), SPACE]
             + [DOWN] * n
             + [SPACE, ENTER, ("shows", "Terjemahan subtitle")]
             + list("indonesia")
@@ -528,7 +541,7 @@ class Picker(unittest.TestCase):
         n = len(originals_of(3))
         out = ask(
             subtitle_menu(3),
-            [DOWN, ENTER, ("shows", "Track subtitle")]
+            [ADDON, DOWN, ENTER, ("shows", "Track subtitle")]
             + [DOWN] * n
             + [SPACE, ENTER, ("shows", "Terjemahan subtitle"), ENTER]
             + [("shows", "Belum ada yang dicentang"), CTRL_C],
@@ -539,7 +552,7 @@ class Picker(unittest.TestCase):
         n = len(originals_of(3))
         out = ask(
             subtitle_menu(3),
-            [DOWN, ENTER, ("shows", "Track subtitle"), SPACE]
+            [ADDON, DOWN, ENTER, ("shows", "Track subtitle"), SPACE]
             + [DOWN] * n
             + [SPACE, ENTER, ("shows", "Terjemahan subtitle"), ENTER],
         )
@@ -548,19 +561,29 @@ class Picker(unittest.TestCase):
     def test_nothing_ticked_in_the_first_list_is_refused(self):
         out = ask(
             subtitle_menu(3),
-            [DOWN, ENTER, ("shows", "Track subtitle"), ENTER, ("shows", "Belum ada"), CTRL_C],
+            [
+                ADDON,
+                DOWN,
+                ENTER,
+                ("shows", "Track subtitle"),
+                ENTER,
+                ("shows", "Belum ada"),
+                CTRL_C,
+            ],
         )
         self.assertIsNone(result(out))
 
     def test_one_video_says_no_coverage_because_there_is_nothing_to_count(self):
-        out = ask(subtitle_menu(1), [DOWN, ENTER, ("shows", "Terjemahan ke bahasa lain"), CTRL_C])
+        out = ask(
+            subtitle_menu(1), [ADDON, DOWN, ENTER, ("shows", "Terjemahan ke bahasa lain"), CTRL_C]
+        )
         self.assertNotIn(" video", out.split("Terjemahan ke bahasa lain")[0])
 
     def test_a_short_list_stays_one_list(self):
         few = captions.TRANSLATIONS[:5]
         out = ask(
             subtitle_menu(1, translations=few),
-            [DOWN, ENTER, ("shows", "Track subtitle"), SPACE, ENTER],
+            [ADDON, DOWN, ENTER, ("shows", "Track subtitle"), SPACE, ENTER],
         )
         self.assertNotIn("Terjemahan ke bahasa lain", out)
         self.assertNotIn("Terjemahan subtitle", out)
@@ -571,6 +594,7 @@ class Picker(unittest.TestCase):
         out = ask(
             subtitle_menu(3, previous=previous),
             [
+                ADDON,
                 ENTER,
                 ("shows", "Terjemahan ke bahasa lain"),
                 ENTER,
