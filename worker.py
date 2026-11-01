@@ -14,7 +14,7 @@ from compat import deno_path, worker_start
 from pathlib import Path
 import yt_dlp
 from yt_dlp.networking import Request
-from yt_dlp.utils import ISO639Utils
+from yt_dlp.utils import DownloadError, ISO639Utils, ThrottledDownload
 from model import (
     container,
     basename,
@@ -515,6 +515,13 @@ def adopt_result(item, root, target, mode, events):
 SELECTION_KEYS = ("requested_formats", "requested_downloads", "requested_subtitles")
 # HTTP statuses that mean a signed link is no longer good.
 STALE_LINK = re.compile(r"\b(403|404|410)\b")
+# Below this speed (bytes per second) for three seconds, yt-dlp calls a download throttled: YouTube
+# lets a link run fast for a while and then slows it to a trickle, and a new link starts fast
+# again. The download stops, asks for a new link and goes on from the bytes it already has.
+THROTTLE_RATE = 100 * 1024
+# How many new links one stream may ask for. After that (or when no new link can be had) the
+# stream goes on without the check, so a connection that is simply slow still finishes.
+THROTTLE_REFRESHES = 5
 
 
 def stream_present(folder, stream):
@@ -541,25 +548,72 @@ def pause_before_download(
     return seconds
 
 
-def download_stream(opts, info, url):
+def reusable(info):
+    """A copy of an extraction that process_ie_result can download from."""
+    reuse = copy.deepcopy(info)
+    for key in SELECTION_KEYS:
+        reuse.pop(key, None)
+    return reuse
+
+
+def fresh_info(opts, url):
+    """The video extracted once more, with the options of a download but without its choice of
+    format (the choice is made again from the new links)."""
+    lookup = {key: value for key, value in opts.items() if key != "format"}
+    with yt_dlp.YoutubeDL({**lookup, "skip_download": True}) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not info:
+        raise ValueError("Informasi video kosong")
+    return info
+
+
+def download_once(opts, info, url):
     """One stream into the temporary folder, and the path of the file.
 
     The extraction made a moment ago for the metadata check is reused: its signed links are
     seconds old, and extracting again costs a full round of requests (and the JavaScript
     challenge) for every stream. Only if the links turn out to be refused, or yt-dlp cannot use
     the reused information, is the video extracted once more, as every stream used to be."""
-    reuse = copy.deepcopy(info)
-    for key in SELECTION_KEYS:
-        reuse.pop(key, None)
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
-            downloaded = ydl.process_ie_result(reuse, download=True)
-        except (yt_dlp.utils.DownloadError, KeyError, TypeError, AttributeError) as exc:
-            if isinstance(exc, yt_dlp.utils.DownloadError) and not STALE_LINK.search(str(exc)):
+            downloaded = ydl.process_ie_result(reusable(info), download=True)
+        except (DownloadError, KeyError, TypeError, AttributeError) as exc:
+            if isinstance(exc, DownloadError) and not STALE_LINK.search(str(exc)):
                 raise
             print("Info ekstraksi tidak dapat dipakai ulang:", exc, file=sys.stderr, flush=True)
-            downloaded = ydl.extract_info(url, download=True)
+            downloaded = ydl.process_ie_result(reusable(fresh_info(opts, url)), download=True)
         return ydl.prepare_filename(downloaded)
+
+
+def download_stream(opts, info, url, events=None, refreshes=THROTTLE_REFRESHES):
+    """One stream into the temporary folder, and the path of the file.
+
+    When opts carries `throttledratelimit` and the speed stays below it, yt-dlp stops with
+    ThrottledDownload. That is not a failure: a new link is asked for and the download goes on
+    from the partial file (`continuedl`). It is done at most `refreshes` times; then the stream
+    goes on without the check."""
+    checking = bool(opts.get("throttledratelimit"))
+    refreshed = 0
+    while True:
+        attempt = opts if checking else {**opts, "throttledratelimit": None}
+        try:
+            return download_once(attempt, info, url)
+        except ThrottledDownload:
+            refreshed += 1
+            message = (
+                f"Kecepatan di bawah {int(opts['throttledratelimit']) // 1024} KB/s · "
+                f"mengambil tautan baru ({refreshed}/{refreshes})"
+            )
+            print(message, file=sys.stderr, flush=True)
+            if events:
+                events.send("retry", message=message)
+            try:
+                info = fresh_info(opts, url)
+            except Exception as exc:
+                # The old link is slow, not dead: finishing slowly beats failing.
+                print("Tautan baru tidak didapat; lanjut tanpa pemeriksaan:", exc, file=sys.stderr)
+                checking = False
+            checking = checking and refreshed < refreshes
 
 
 def remove_temporary(folder):
@@ -688,11 +742,12 @@ def download(request, events):
                 "outtmpl": str(temp_root / ("%(id)s-" + stream + ".%(ext)s")),
                 "writeautomaticsub": False,
                 "writesubtitles": False,
+                "throttledratelimit": THROTTLE_RATE,
             }
             with timings.phase(stream):
                 if not stream_present(temp_root, stream):
                     pause_before_download(events, pace_of(request))
-                filepath = download_stream(local, info, item["url"])
+                filepath = download_stream(local, info, item["url"], events)
             if not Path(filepath).is_file():
                 raise ValueError("File sementara tidak ditemukan setelah download")
             paths[stream] = filepath
