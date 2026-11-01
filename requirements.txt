@@ -2,3 +2,4 @@ yt-dlp[default]==2026.8.19
 rich==14.3.4
 questionary==2.1.1
 packaging==26.3
+curl-cffi==0.16.0

@@ -236,7 +236,15 @@ class Fetching(unittest.TestCase):
         )
         self.assertEqual(worker.failure_reason(ValueError("Subtitle kosong")), "empty")
         self.assertEqual(worker.failure_reason(OSError("disk")), "failed")
-        for code in ("limited", "ffmpeg", "empty", "failed", "unavailable", "path"):
+        for code in (
+            "limited",
+            "ffmpeg",
+            "empty",
+            "failed",
+            "unavailable",
+            "path",
+            "impersonation",
+        ):
             self.assertIn(code, model.MISSING_REASONS)
 
 
@@ -393,6 +401,16 @@ class Batch(unittest.TestCase):
         job, stop = self.execute([self.other] * 4)
         self.assertIsNone(stop.category)
         self.assertEqual((len(self.asked), job["status"]), (4, "partial"))
+
+    def test_a_missing_curl_cffi_stops_at_the_first_video_and_does_not_say_to_wait(self):
+        job, stop = self.execute([[{"key": "id", "reason": "impersonation"}]] * 5)
+        self.assertEqual(self.asked, ["i0"])
+        self.assertEqual((stop.category, job["status"]), ("dependency", "blocked"))
+        self.assertIn("curl_cffi", str(stop))
+        self.assertIn("setup", str(stop))
+        self.assertNotIn("Tunggu beberapa menit", str(stop))
+        # The video that was saved keeps its media and waits for a resume.
+        self.assertEqual([i["status"] for i in job["items"]], ["partial"] + ["pending"] * 4)
 
 
 class Many(unittest.TestCase):

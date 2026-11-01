@@ -295,6 +295,22 @@ def rate_limited(exc):
     return status == 429 or classify(exc) == "rate_limit"
 
 
+def impersonation_target(ydl, wanted):
+    """The browser that a request has to look like, or None when it need not or cannot.
+
+    yt-dlp marks the subtitles of YouTube `impersonate: True`: YouTube answers 429 to a request
+    that does not come with the TLS fingerprint of a browser, however long one waits. Its own
+    downloader looks the target up like this (and warns when there is none); curl_cffi is what
+    provides one. None means: ask the plain way."""
+    if not wanted:
+        return None
+    try:
+        available, _requested = ydl._parse_impersonate_targets(wanted)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return available
+
+
 def failure_reason(exc):
     """Why a subtitle was not saved, as a short code (model.MISSING_REASONS says it in words).
     Only the kind of failure is kept, never the message, which can carry a signed link."""
@@ -334,6 +350,7 @@ def subtitle_files(info, item, root, events, opts, pace=None, sleep=time.sleep):
     prefix = subtitle_prefix(item)
     fetched = 0
     limited = 0
+    unequipped = False
     with yt_dlp.YoutubeDL(opts) as ydl:
         for track in item.get("subtitles", []):
             target = subtitle_path(root, prefix, track)
@@ -343,6 +360,10 @@ def subtitle_files(info, item, root, events, opts, pace=None, sleep=time.sleep):
                 continue
             if limited >= LIMITED_STOP:
                 missing.append({**track, "reason": "limited"})
+                continue
+            if unequipped:
+                # Refused once for want of curl_cffi: the next request would be refused the same.
+                missing.append({**track, "reason": "impersonation"})
                 continue
             if fetched:
                 pause_before_download(events, pace, sleep, message="Menunggu · jeda antar-subtitle")
@@ -358,6 +379,11 @@ def subtitle_files(info, item, root, events, opts, pace=None, sleep=time.sleep):
                 events.send("notice", message="Subtitle tidak tersedia · " + track["name"])
                 continue
             f = formats[0]
+            browser = impersonation_target(ydl, f.get("impersonate"))
+            # Wanted and not possible: the plain request is still made (some sessions are let
+            # through), but a refusal of it is blamed on the missing curl_cffi, not on the rate.
+            plain = bool(f.get("impersonate")) and browser is None
+            extensions = {"impersonate": browser} if browser else {}
             raw = target.with_suffix("." + f["ext"] + ".part")
             temp = target.with_suffix(".new.srt")
             try:
@@ -366,7 +392,11 @@ def subtitle_files(info, item, root, events, opts, pace=None, sleep=time.sleep):
                     try:
                         with (
                             ydl.urlopen(
-                                Request(f["url"], headers=info.get("http_headers", {}))
+                                Request(
+                                    f["url"],
+                                    headers=info.get("http_headers", {}),
+                                    extensions=extensions,
+                                )
                             ) as response,
                             raw.open("wb") as stream,
                         ):
@@ -384,7 +414,11 @@ def subtitle_files(info, item, root, events, opts, pace=None, sleep=time.sleep):
                                 reply.close()
                         # A server that says "too many requests" gets one more try after the
                         # pause it asked for, not four: asking on only makes the limit last.
-                        if attempt == (1 if rate_limited(exc) else 4):
+                        # Without the browser look the answer will not change, so no more tries.
+                        last_try = 4
+                        if rate_limited(exc):
+                            last_try = 0 if plain else 1
+                        if attempt == last_try:
                             break
                         seconds = min(30, 2**attempt)
                         value = headers.get("Retry-After")
@@ -408,11 +442,26 @@ def subtitle_files(info, item, root, events, opts, pace=None, sleep=time.sleep):
             except Exception as exc:
                 print("Subtitle gagal:", exc, file=sys.stderr, flush=True)
                 reason = failure_reason(exc)
+                if reason == "limited" and plain:
+                    reason = "impersonation"
+                    unequipped = True
+                    print(
+                        "Subtitle YouTube diminta tanpa tiruan browser (curl_cffi tidak ada); "
+                        "jalankan setup untuk memasangnya",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 missing.append({**track, "reason": reason})
                 limited = limited + 1 if reason == "limited" else 0
                 events.send(
                     "notice", message="Subtitle gagal · " + track["name"] + "; media tetap disimpan"
                 )
+                if unequipped:
+                    events.send(
+                        "notice",
+                        message="Subtitle YouTube butuh curl_cffi (belum terpasang) · "
+                        "jalankan setup, lalu resume",
+                    )
                 if limited >= LIMITED_STOP:
                     events.send(
                         "notice",

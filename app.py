@@ -136,6 +136,11 @@ def stop_message(category):
         return "YouTube meminta login. Login di Firefox, lalu lanjutkan:"
     if category == "rate_limit":
         return "YouTube membatasi permintaan. Tunggu beberapa menit, lalu lanjutkan:"
+    if category == "dependency":
+        return (
+            "Subtitle YouTube harus diminta seperti browser, dan curl_cffi belum terpasang "
+            "(menunggu tidak membantu). Jalankan setup, lalu lanjutkan:"
+        )
     if category == "network":
         return "Tiga kegagalan jaringan berurutan. Periksa koneksi internet, lalu lanjutkan:"
     text = "Tiga kegagalan berurutan; periksa log."
@@ -1021,6 +1026,12 @@ def subtitles_limited(result):
     return any(m.get("reason") == "limited" for m in (result or {}).get("missing", []))
 
 
+def subtitles_need_curl_cffi(result):
+    """True when a result lost a subtitle because curl_cffi is missing: the same request fails for
+    every video until it is installed, so the batch does not go on."""
+    return any(m.get("reason") == "impersonation" for m in (result or {}).get("missing", []))
+
+
 def saved_subtitles(item, root):
     """The result of an item of the subtitle-only mode whose files are all on disk, or None when
     one is missing (or the item has none): the worker is asked only for what is not there."""
@@ -1137,6 +1148,14 @@ def execute(ui, job):
                             item.pop("timings", None)
                         session.item_end(item["status"], timings)
                         consecutive = 0
+                        if subtitles_need_curl_cffi(result):
+                            checkpoint()
+                            job["status"] = "blocked"
+                            raise Stopped(
+                                "Batch dihentikan. " + stop_message("dependency"),
+                                job["id"],
+                                category="dependency",
+                            )
                         limited = limited + 1 if subtitles_limited(result) else 0
                         if limited >= LIMITED_ITEMS_STOP:
                             checkpoint()

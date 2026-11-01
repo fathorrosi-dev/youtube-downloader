@@ -452,6 +452,9 @@ def release_age_days(version, today=None):
 MISSING_REASONS = {
     "unavailable": "tidak tersedia",
     "limited": "dibatasi · 429",
+    # YouTube refused a subtitle that has to be asked for like a browser asks, and curl_cffi (what
+    # lets yt-dlp do that) is not installed. Waiting does not help; installing it does.
+    "impersonation": "butuh curl_cffi · jalankan setup",
     "empty": "kosong",
     "ffmpeg": "FFmpeg gagal",
     "path": "path terlalu panjang",
