@@ -22,6 +22,7 @@ from model import (
     classify,
     pace_of,
     pace_profile,
+    slim_captions,
     subtitle_path,
     subtitle_prefix,
 )
@@ -217,8 +218,10 @@ def compact(info):
         "dynamic_range",
     )
     output["formats"] = [{k: f.get(k) for k in fields} for f in info.get("formats", [])]
-    output["subtitles"] = info.get("subtitles", {})
-    output["automatic_captions"] = info.get("automatic_captions", {})
+    # The captions of a video with many tracks are megabytes of signed URLs; the menus need the
+    # languages (model.slim_captions), and the download asks yt-dlp for the URLs again.
+    output["subtitles"] = slim_captions(info.get("subtitles"))
+    output["automatic_captions"] = slim_captions(info.get("automatic_captions"))
     return output
 
 

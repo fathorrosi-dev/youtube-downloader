@@ -42,21 +42,41 @@ ASR = ("en", "English")
 def _entries(base, extra, name):
     """The formats yt-dlp lists under one key: one entry per subtitle format."""
     query = "".join(f"&{key}={value}" for key, value in extra.items())
+    signed = "&c=WEB&xosf=" in base
     return [
-        {"ext": ext, "url": f"{base}{query}&fmt={ext}", "name": name}
+        {
+            "ext": ext,
+            "url": f"{base}{query}&fmt={ext}",
+            "name": name,
+            # What yt-dlp adds to the entries of a YouTube video.
+            **({"impersonate": True, "__yt_dlp_client": "web"} if signed else {}),
+        }
         for ext in ("vtt", "ttml", "srv3", "srv2", "srv1", "json3")
     ]
 
 
-def captions(video_id, translations=TRANSLATIONS, manual=MANUAL, asr=ASR):
+# What YouTube adds to a caption address besides the language, and yt-dlp passes on as it is: a
+# signed request (ei, opi, xoaf, ip, ipbits, expire, sparams, signature) and a PO token. About
+# 600 bytes; the real one varies, but never by much.
+SIGNED = (
+    "&ei=" + "e" * 24 + "&opi=112496729&xoaf=5&hl=en&ip=0.0.0.0&ipbits=0&expire=1793000000"
+    "&sparams=ip%2Cipbits%2Cexpire%2Cv%2Cei%2Copi%2Cxoaf"
+    "&signature=" + "S" * 40 + "." + "S" * 40 + "&key=yt8&pot=" + "P" * 160 + "&potc=1&c=WEB&xosf="
+)
+
+
+def captions(video_id, translations=TRANSLATIONS, manual=MANUAL, asr=ASR, signed=False):
     """(subtitles, automatic_captions) of a video that has captions written by the creator
     (`manual`, or None) and automatic ones (`asr`, or None), both translatable.
 
     The keys follow yt-dlp: a translation of the creator's captions is `<language>-<source>`, a
     translation of the automatic ones is plain `<language>`, and the automatic captions
-    themselves are the source language and `<source>-orig`."""
+    themselves are the source language and `<source>-orig`.
+
+    With `signed` the addresses carry what YouTube's carry (SIGNED), and an entry the other
+    things yt-dlp puts on one, so that their size is the real one."""
     subtitles, automatic = {}, {}
-    page = f"https://www.youtube.com/api/timedtext?v={video_id}"
+    page = f"https://www.youtube.com/api/timedtext?v={video_id}" + (SIGNED if signed else "")
     if manual:
         code, name = manual
         base = f"{page}&lang={code}"
@@ -79,6 +99,27 @@ def captions(video_id, translations=TRANSLATIONS, manual=MANUAL, asr=ASR):
 def video(video_id, title=None, language="en", **kwargs):
     """What the worker returns for one video (worker.compact) when it has captions."""
     subtitles, automatic = captions(video_id, **kwargs)
+    return {
+        "id": video_id,
+        "title": title or "Video " + video_id,
+        "language": language,
+        "formats": [],
+        "subtitles": subtitles,
+        "automatic_captions": automatic,
+    }
+
+
+def heavy_video(video_id, count=24, title=None, language="en"):
+    """A video that a person made captions for in `count` languages (a talk, a course), each
+    translatable into every language, with the addresses at their real size, plus the automatic
+    captions. What worker.compact gave for it before the captions were reduced was 13 MiB for
+    24 languages, more than the 8 MiB that one event of the worker may have (runner.MAX_EVENT)."""
+    subtitles, automatic = {}, {}
+    for manual in TRANSLATIONS[:count]:
+        written, translated = captions(video_id, manual=manual, asr=None, signed=True)
+        subtitles.update(written)
+        automatic.update(translated)
+    automatic.update(captions(video_id, manual=None, signed=True)[1])
     return {
         "id": video_id,
         "title": title or "Video " + video_id,

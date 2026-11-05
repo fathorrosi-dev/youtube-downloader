@@ -5,7 +5,7 @@ import json
 import math
 import re
 from datetime import date
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 VERSION = "1.3.1"
 # A yt-dlp release older than this many days is worth a hint when downloads fail.
@@ -185,6 +185,38 @@ def pick(
         # Stored only when asked for, so the identity of every other download is unchanged.
         choice["compatible"] = True
     return choice
+
+
+# The only parts of a caption URL that tracks() reads: the language of the captions and the
+# language they are translated into. Everything else in the URL is a signed request for the file.
+CAPTION_PARAMS = ("lang", "tlang")
+
+
+def slim_captions(captions):
+    """`subtitles` or `automatic_captions` of yt-dlp, reduced to what tracks() and the menus read.
+
+    yt-dlp lists every caption track once per language it can be translated into (about 150) and
+    once per format (6), each with a signed URL of about 1 KiB: a video with a dozen or more
+    tracks makes the answer of the inspection larger than the 8 MiB that the worker's channel
+    carries (runner.MAX_EVENT). The download does not use this copy; it asks yt-dlp again, so it
+    has the full URLs.
+
+    Per key this keeps the first entry, which is the only one tracks() reads, with its
+    extension and name and an address cut down to CAPTION_PARAMS. The keys stay as they are,
+    also the empty ones: a key is what `source in info["subtitles"]` asks about."""
+    slim = {}
+    for key, formats in (captions or {}).items():
+        if not formats:
+            slim[key] = []
+            continue
+        first = formats[0]
+        url = urlparse(first.get("url") or "")
+        query = parse_qs(url.query)
+        keep = [(name, value) for name in CAPTION_PARAMS for value in query.get(name, [])]
+        entry = {k: first[k] for k in ("ext", "name") if k in first}
+        entry["url"] = urlunparse(url._replace(params="", query=urlencode(keep), fragment=""))
+        slim[key] = [entry]
+    return slim
 
 
 def tracks(info):
